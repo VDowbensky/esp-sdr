@@ -50,7 +50,7 @@ def main():
                 '-DESP_SDR_STREAMING=' + ('ON' if profile.get('streaming') else 'OFF')]
     if not profile.get('streaming'):
         command += ['-DRING_PROBE=OFF', '-DSAMPLE_RATE_PROBE=OFF', '-DFILTER_REGISTER_PROBE=OFF',
-                    '-DS3_RF_PROBE=OFF', '-DC5_TUNE_PROBE=OFF', '-DS2_RF_PROBE=OFF']
+                    '-DS3_RF_PROBE=OFF', '-DC5_TUNE_PROBE=OFF', '-DS2_RF_PROBE=OFF', '-DC5_GAP_PROBE=OFF']
     command.append('build')
     subprocess.run(command, env=env, check=True)
     export(build, output, profile['id'], profile['label'], args.version, profile['allow_larger_flash'])

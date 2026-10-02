@@ -190,6 +190,9 @@ static bool acquire_iq(unsigned n,unsigned divider,unsigned *capture_us) {
 
 #if CONFIG_IDF_TARGET_ESP32C5
 #include "c5_opt.h"        /* ESPsoup extensions (register-level engine, DSP, continuous capture) */
+#if defined(C5_GAP_PROBE)
+#include "c5_gap_probe.h"
+#endif
 #endif
 
 static bool spectrum_acquire(unsigned n, unsigned rate, const uint32_t **data, unsigned *elapsed) {
@@ -306,6 +309,9 @@ static void handle_command(char *line) {
     /* ESPsoup extensions first: the three-argument SPEC lives there, the
      * six/seven-argument SPEC below is the shared spectrum protocol. */
     if(opt_command(line))return;
+#if defined(C5_GAP_PROBE)
+    if(gap_probe_command(line))return;
+#endif
 #endif
     if (spectrum_command(line, frequency_mhz, spectrum_acquire)) return;
     if(!strcmp(line,"RELEASE")){reply("OK\n");return;}

@@ -52,8 +52,10 @@ elseif(IDF_TARGET STREQUAL "esp32c5" OR IDF_TARGET STREQUAL "esp32c6" OR IDF_TAR
     endif()
     list(APPEND probes SAMPLE_RATE_PROBE FILTER_REGISTER_PROBE C5_TUNE_PROBE)
     if(IDF_TARGET STREQUAL "esp32c5")
-        # ESPsoup extensions: on-chip temperature sensor.
-        list(APPEND dependencies esp_driver_tsens)
+        # ESPsoup extensions: on-chip temperature sensor, GDMA (async memcpy) for the gap diagnostics.
+        list(APPEND dependencies esp_driver_tsens esp_driver_dma)
+        option(C5_GAP_PROBE "Build C5 dump-bank gap diagnostics (never package)" OFF)
+        list(APPEND probes C5_GAP_PROBE)
     endif()
 endif()
 

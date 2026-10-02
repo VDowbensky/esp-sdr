@@ -26,3 +26,8 @@ CONFIG_ESP_SDR_UART_RX_PIN=12
 
 # ESPsoup: fewer static Wi-Fi RX buffers (as on C6/C61) leave more heap.
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=4
+
+# ESPsoup extensions. Continuous capture (STREAM/CSPEC/CPKT/VFM/GFSK) runs the
+# main task for seconds without yielding; the task watchdog would print a
+# register dump into the USB stream. Host stalls end a run via its own timeout.
+# CONFIG_ESP_TASK_WDT_EN is not set
