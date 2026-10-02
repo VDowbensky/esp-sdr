@@ -45,6 +45,16 @@ static bool capture(unsigned n,unsigned d,unsigned f) { ++captures;last_samples=
 static void vTaskDelay(int ticks) {}
 static unsigned phy_chip_i2c_readReg(unsigned a,unsigned b,unsigned c) { return 4; }
 #define REG_READ(a) 0u
+#if CONFIG_IDF_TARGET_ESP32C5
+/* ESPsoup extensions (c5_opt.h) are host-tested separately; stand-ins here. */
+#define CAP_MAX_WORDS 32704u
+#define C5_OPT_CAPS " BIGCAP"
+static unsigned opt_calls;
+static int c5_khz_offset;
+static bool opt_command(char *s){opt_calls++;if(strcmp(s,"FWOPT?"))return false;reply("FWOPT test\n");return true;}
+#else
+#define CAP_MAX_WORDS IQ_WORDS
+#endif
 #if CONFIG_IDF_TARGET_ESP32C61
 static unsigned calibrated,pll,tunes;
 void phy_chip_set_chan(unsigned f,unsigned mode) { assert(mode==0);calibrated=f;pll=f;tunes++; }
@@ -77,7 +87,17 @@ int main(void) {
  command("CAP16 16380 5");assert(captures==1 && last_samples==16380 && last_format==16);
  command("CAP20 257 0");assert(captures==2 && last_samples==257 && last_format==20);
  command("RXRUN 256 3 2 20");assert(captures==4 && !strcmp(response,"END\n"));
- const char *bad[]={"CAP16 16381 0","CAP20 255 0","CAP20 16380 6","CAP20 256 0 junk",
+#if CONFIG_IDF_TARGET_ESP32C5
+ command("CAP16 32704 1");assert(captures==5 && last_samples==32704 && last_format==16);
+ captures=4;
+ command("FWOPT?");assert(!strcmp(response,"FWOPT test\n") && opt_calls);
+ command("CAPS");assert(strstr(response,"BIGCAP"));
+ c5_khz_offset=300;command("FREQ 2437");assert(!c5_khz_offset);
+ const char *bad[]={"CAP16 32705 0","CAP20 255 0",
+#else
+ const char *bad[]={"CAP16 16381 0","CAP20 255 0",
+#endif
+"CAP20 16380 6","CAP20 256 0 junk",
  "RXRUN 256 0 0 20","RXRUN 256 0 1001 20","RXRUN 256 0 2 32","FREQ 5180 junk",
  "FREQ 2399.5","GAIN AUTO","TX20 256 1000000 0","CW START","REPLAY20 256 40000000 0"};
  for(unsigned i=0;i<sizeof(bad)/sizeof(bad[0]);i++){command(bad[i]);assert(!strcmp(response,"ERR command\n"));}

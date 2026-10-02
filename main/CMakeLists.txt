@@ -51,6 +51,10 @@ elseif(IDF_TARGET STREQUAL "esp32c5" OR IDF_TARGET STREQUAL "esp32c6" OR IDF_TAR
         message(FATAL_ERROR "Filter register diagnostics are not characterized for C6")
     endif()
     list(APPEND probes SAMPLE_RATE_PROBE FILTER_REGISTER_PROBE C5_TUNE_PROBE)
+    if(IDF_TARGET STREQUAL "esp32c5")
+        # ESPsoup extensions: on-chip temperature sensor.
+        list(APPEND dependencies esp_driver_tsens)
+    endif()
 endif()
 
 if(IDF_TARGET STREQUAL "esp32s31")

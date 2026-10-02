@@ -1,9 +1,13 @@
 /* Capability extension to protocol 6: numeric ranges are [min,max,step].
  * bandwidth adds its default MHz (0 = open); null means uncharacterized. */
 #include "rx_bandwidth.h"
+/* Targets may append further JSON keys (ESPsoup C5: c5_opt_caps.h). */
+#ifndef LIMITS_EXTRA
+#define LIMITS_EXTRA ""
+#endif
 static bool limits_command(const char *line) {
     if(strcmp(line,"LIMITS?"))return false;
-    char h[224];
+    char h[224+sizeof(LIMITS_EXTRA)];
     snprintf(h,sizeof(h),"LIMITS {\"gain\":[0,%u,1],\"bandwidth\":"
 #if CONFIG_IDF_TARGET_ESP32H2
              "[4,11,1,0]"
@@ -34,6 +38,6 @@ static bool limits_command(const char *line) {
 #else
              "80000000,40000000,20000000,10000000,8000000,4000000"
 #endif
-             "],\"bits\":[8,10]}\n",gain_max());
+             "],\"bits\":[8,10]" LIMITS_EXTRA "}\n",gain_max());
     reply(h);return true;
 }

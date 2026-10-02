@@ -71,6 +71,9 @@ int cmd_parse(char *cmd,char *name,int *argc,char **argv) {
 #define send_bytes burst_serial_send
 static void reply(const char *s) { (void)send_bytes(s,strlen(s)); }
 #include "burst_gain.h"
+#if CONFIG_IDF_TARGET_ESP32C5
+#include "c5_opt_caps.h"   /* ESPsoup extensions: CAPS tokens, LIMITS? keys */
+#endif
 #include "burst_limits.h"
 
 static void prepare_rx(void) {
@@ -185,7 +188,15 @@ static bool acquire_iq(unsigned n,unsigned divider,unsigned *capture_us) {
     return true;
 }
 
+#if CONFIG_IDF_TARGET_ESP32C5
+#include "c5_opt.h"        /* ESPsoup extensions (register-level engine, DSP, continuous capture) */
+#endif
+
 static bool spectrum_acquire(unsigned n, unsigned rate, const uint32_t **data, unsigned *elapsed) {
+#if CONFIG_IDF_TARGET_ESP32C5
+    /* Same samples without the ~1.7 ms vendor stall per snapshot (ENGINE STOCK restores it). */
+    if (!opt_stock_engine) return opt_acquire(n, rate, data, elapsed);
+#endif
     bool ok = acquire_iq(n, rate, elapsed);
     *data = IQ_BUFFER;
     return ok;
@@ -194,6 +205,11 @@ static bool spectrum_acquire(unsigned n, unsigned rate, const uint32_t **data, u
 #include "ring_probe.h"
 
 static bool capture(unsigned n,unsigned divider,unsigned format) {
+#if CONFIG_IDF_TARGET_ESP32C5
+    /* ESPsoup: register-level engine (no ~1.7 ms vendor overhead, up to
+     * CAP_MAX_WORDS samples). ENGINE STOCK restores the vendor adctrig path. */
+    if (!opt_stock_engine || n > IQ_WORDS) return opt_capture(n, divider, format, false);
+#endif
     unsigned elapsed;
     if (!acquire_iq(n, divider, &elapsed)) return false;
     size_t bytes=wire_size(n,format);
@@ -277,11 +293,19 @@ void app_main(void) {
 }
 
 static void handle_command(char *line) {
+#ifndef CAP_MAX_WORDS
+#define CAP_MAX_WORDS IQ_WORDS   /* C5: BIGCAP limit from c5_opt_caps.h */
+#endif
 #ifdef RING_PROBE
     if(ring_probe_command(line)) return;
 #endif
 #if CONFIG_IDF_TARGET_ESP32C61 || CONFIG_IDF_TARGET_ESP32C6
     if(ring_test(line))return;
+#endif
+#if CONFIG_IDF_TARGET_ESP32C5
+    /* ESPsoup extensions first: the three-argument SPEC lives there, the
+     * six/seven-argument SPEC below is the shared spectrum protocol. */
+    if(opt_command(line))return;
 #endif
     if (spectrum_command(line, frequency_mhz, spectrum_acquire)) return;
     if(!strcmp(line,"RELEASE")){reply("OK\n");return;}
@@ -307,7 +331,7 @@ static void handle_command(char *line) {
         }
 #endif
         else if(sscanf(line,"RXRUN %u %u %u %u %c",&n,&rate,&repeats,&crc,&extra)==4 &&
-                n>=256 && n<=IQ_WORDS && rate<=(CONFIG_IDF_TARGET_ESP32C6?0:5) && repeats>0 && repeats<=1000 && (crc==16 || crc==20)) {
+                n>=256 && n<=CAP_MAX_WORDS && rate<=(CONFIG_IDF_TARGET_ESP32C6?0:5) && repeats>0 && repeats<=1000 && (crc==16 || crc==20)) {
             /* Format 16 = IQ8, 20 = IQ10 packed. Each frame
              * is a separate capture, with RF gaps during USB transfer. */
             bool ok=true;
@@ -327,6 +351,9 @@ static void handle_command(char *line) {
                   " LPF LPF12"
 #endif
                   " ALPF"
+#if CONFIG_IDF_TARGET_ESP32C5
+                  C5_OPT_CAPS
+#endif
 #if CONFIG_ESP_SDR_UART_ENABLED
                   " DUALSERIAL"
 #endif
@@ -364,9 +391,12 @@ static void handle_command(char *line) {
             char h[64];snprintf(h,sizeof(h),BURST_ID " 6 burst %u\n",IQ_WORDS);reply(h);
         }
         else if(sscanf(line,"FREQ %u %c",&n,&extra)==1 && frequency_valid(n)) {
+#if CONFIG_IDF_TARGET_ESP32C5
+            c5_khz_offset=0;
+#endif
             frequency_mhz=n;rx_ready=false;prepare_rx();reply("OK\n");
         } else if(((!strncmp(line,"CAP ",4) && sscanf(line,"CAP %u %u %c",&n,&rate,&extra)==2) ||
                    (!strncmp(line,"CAP20 ",6) && sscanf(line,"CAP20 %u %u %c",&n,&rate,&extra)==2)) &&
-                   n>=256 && n<=IQ_WORDS && rate<=(CONFIG_IDF_TARGET_ESP32C6?0:5)) capture(n,rate,!strncmp(line,"CAP20 ",6)? (iq8?16:20):0);
+                   n>=256 && n<=CAP_MAX_WORDS && rate<=(CONFIG_IDF_TARGET_ESP32C6?0:5)) capture(n,rate,!strncmp(line,"CAP20 ",6)? (iq8?16:20):0);
         else reply("ERR command\n");
 }
