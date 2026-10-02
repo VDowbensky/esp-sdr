@@ -34,7 +34,7 @@ class EspsoupC5Dsp(unittest.TestCase):
     def test_vfm_and_gfsk_demodulators(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = dict(os.environ, DEMOD_HOST=self.build(tmp, 'demod_host.c', 'demod_host'), ESPSOUP_TEST_DIR=tmp)
-            for script in ['test_vfm.mjs', 'test_gfsk.mjs']:
+            for script in ['test_vfm.mjs', 'test_gfsk.mjs', 'test_vfm_color.mjs']:
                 with self.subTest(script=script):
                     run = subprocess.run(['node', str(HERE / script)], env=env, capture_output=True, text=True)
                     self.assertEqual(run.returncode, 0, run.stdout[-4000:] + run.stderr[-2000:])

@@ -73,9 +73,14 @@ typedef struct {
     /* PARLIO source (vf_block_p8): 1 = bytes from parlio_cap.h; carried phase point, absolute byte count of the
      * next block, prediction floor after a relock (no line twice), phase re-init flag */
     unsigned src, pphase, pinit; int64_t sabs, done16;
+    /* colour (VFMCOLOR, PARLIO source only; NULL = off): the raw bytes of the current window = the last cx_keepb
+     * bytes of the previous block (cx_tail) followed by the current block (cx_cur); cx_abs0 = absolute byte index of
+     * window byte 0 (phase reference of the subcarrier oscillator) */
+    struct vc_s *vc;
+    const uint8_t *cx_cur, *cx_tail, *px_prev; unsigned cx_keepb, cx_n, px_prev_n; int64_t cx_abs0;
     /* statistics */
     uint32_t blocks, lines, l_sync, l_fly, l_out, l_drop_rate, l_drop_cut, l_vbi, vsyncs, relocks, acq;
-    uint64_t cyc_disc, cyc_sync, cyc_slice, samples;
+    uint64_t cyc_disc, cyc_sync, cyc_slice, cyc_color, samples;
 } vf_t;
 
 static const int32_t VF_T16[3] = {0, 320 << 16, 20826457};            /* PAL 64 us, NTSC 63.5556 us (Q16 bins) */
@@ -275,7 +280,7 @@ static int vf_field2(int std, unsigned ln) { return std == 1 ? ln >= 313 : ln >=
  * exact box average of the instantaneous frequency (prefix sums of the bins,
  * linear inside a bin), mapped to bytes: 0 = sync tip, 64 = blanking,
  * 213 = white (64 + 64 * 0.7/0.3). */
-static void DM_ATTR vf_slice(const vf_t *s, unsigned nb, int64_t a0l, int64_t L, uint8_t *o) {
+static void VFP_ATTR vf_slice(const vf_t *s, unsigned nb, int64_t a0l, int64_t L, uint8_t *o) {   /* IRAM on the device (hot with colour on) */
     (void)nb; const int16_t *v = s->bins; const unsigned px = s->px;    /* v[nb] = 0 (padding, set by vf_block) */
     const int32_t a0 = (int32_t)a0l, step = (int32_t)L / (int32_t)px;   /* Q16 bins, < 2^29: 32 bit is exact */
     int32_t den = s->blank16 - s->tip16; if (den < 16) den = 16;
@@ -303,6 +308,229 @@ static void DM_ATTR vf_slice(const vf_t *s, unsigned nb, int64_t a0l, int64_t L,
 static int32_t vf_mean_z(const vf_t *s, int32_t b0, int32_t b1) {      /* Q4 mean of z over bins [b0, b1) */
     int32_t a = 0; for (int32_t b = b0; b < b1; b++) a += s->bins[b];
     return s->pol * a * 16 / (b1 - b0);
+}
+
+/* ============================================== VFM colour (CAPS VFMCOLOR, PARLIO source)
+ * The colour subcarrier (PAL 4.43361875 MHz, NTSC 3.579545 MHz) is a frequency modulation of the FM carrier at that
+ * rate.  For selected lines the phase steps of the raw bytes (lag `step` bytes, 2*pi/256 units, +128 offset) are
+ * mixed with a subcarrier oscillator whose phase is the ABSOLUTE byte index times fsc/40 MHz (one phase-continuous
+ * oscillator for the whole run) and summed over the burst (central 70 %) and over nseg segments of the active line.
+ * Mixing cheaply: P consecutive samples span almost exactly an integer number of subcarrier cycles (PAL 9 bytes =
+ * 0.9976 cycles, NTSC 11 bytes = 0.984), so the steps are first summed into P bins by (sample index mod P) over up to
+ * G groups (residual phase slip <= 30 deg, the bins are weighted with the phase at the centre of the run), then the P
+ * bins are combined with one sine-table weight each: ~7 operations per byte instead of two multiplies.  Subtracting
+ * the bin mean removes the luma (DC) leakage exactly.
+ * Reference: the bursts of the colour line and of the line before it (computed only there); their sum points to
+ * the mean burst axis (PAL: the bisector of the +-45 deg swing, NTSC: the burst itself), the PAL V switch of the line
+ * is the side of its own burst.  U/V are rotated to that axis and scaled to luma steps (149 steps = 0.7 V, from the
+ * sync tip / blanking levels of the line logic) - so the chroma saturation does not depend on the burst amplitude,
+ * which is reported separately (host: automatic colour control = scale by nominal burst / measured burst).
+ * Record (VC_REC + 2 * nseg bytes): u16 line, u8 flags, u8 burst amplitude (luma steps), u32 t16 (= the t16 of the
+ * luma record of the same line), u8 burst phase and u8 reference phase used for this line (2*pi/256, against the
+ * run's absolute oscillator: a host can smooth the reference over many lines and re-rotate U/V), then nseg x
+ * (i8 U, i8 V) in luma steps (U = 0.493 (B'-Y'), V = 0.877 (R'-Y') of the white-normalised picture times 149). */
+#define VC_REC 10u
+#define VC_F_VNEG 1u              /* PAL: V switch -1 on this line (already applied to V) */
+#define VC_F_REF2 2u              /* reference from this and the previous line's burst (else the smoothed reference) */
+#define VC_F_WEAK 4u              /* burst below 4 luma steps: no colour (colour killer) */
+#define VC_F_VLOCK 8u
+#define VC_F_FIELD2 16u
+#define VC_F_NTSC 32u
+#define VC_TMP 560u
+typedef struct vc_s {
+    unsigned nseg, every, step;                         /* config: segments per line 4..64, every n-th line, phase of every step-th byte (1, 2, 4) */
+    /* derived by vc_setup for the detected standard */
+    int std; unsigned P, G, segb, sgr, soff, a0, b0, bgr, boff, gc; uint32_t incb; int16_t wc[11], ws[11];   /* bin weights, Q10 */
+    /* state */
+    int32_t pbr, pbi; uint32_t pb_lc; int pb_ok;        /* burst of the line before a colour line (>> 4) */
+    unsigned rang;                                      /* reference phase of the last two-burst line (2*pi/256), fallback */
+    uint8_t *out; unsigned max, n;                      /* records of the current window (caller) */
+    uint32_t rate; int32_t bucket;                      /* own USB budget (bytes/s, 0 = unlimited), refilled by vf_block_p8 */
+    uint8_t tmp[VC_TMP];                                /* a range that straddles the two window pieces */
+    /* statistics */
+    uint32_t lines, ref2, weak, drop_rate, drop_full, drop_cut, pre;
+} vc_t;
+
+/* returns 0 on bad configuration */
+static int vc_init(vc_t *c) {
+    if (c->nseg < 4 || c->nseg > 64 || (c->step != 1 && c->step != 2 && c->step != 4) || c->every < 1 || c->every > 625) return 0;
+    c->std = 0; c->pb_ok = 0; c->rang = 64; c->n = 0; c->bucket = 4096;
+    return 1;
+}
+static void vc_setup(vc_t *c, int std) {
+    const unsigned S = c->step, pal = std != 2;
+    c->std = std;
+    c->incb = pal ? 476056188u : 384350767u;            /* round(fsc / 40 MHz * 2^32) */
+    c->P = pal ? 9 : 11;
+    /* the lag-S phase step is a boxcar of S bytes: gain sinc(S fsc / 40 MHz) at the subcarrier, compensated (Q12) */
+    static const uint16_t GC[2][3] = {{4180, 4447, 5797}, {4150, 4320, 5106}};
+    c->gc = GC[pal ? 0 : 1][S == 1 ? 0 : S == 2 ? 1 : 2];
+    int32_t slip = (int32_t)(c->P * S * c->incb);       /* residual phase per group (Q32 cycles) */
+    uint32_t as = (uint32_t)(slip < 0 ? -slip : slip);
+    c->G = as ? (unsigned)(357913941u / as) : 64;       /* 2^32 / 12: <= 30 deg over one run */
+    if (c->G < 1) c->G = 1;
+    if (c->G > 64) c->G = 64;
+    for (unsigned m = 0; m < c->P; m++) {              /* exp(-j m w_s) of the P bins (Q10), the run phase is applied once per run */
+        unsigned i = (unsigned)((m * S * c->incb + (1u << 23)) >> 24) & 255u;
+        c->wc[m] = (int16_t)((vc_sin_tab[(i + 64) & 255] + 8) >> 4); c->ws[m] = (int16_t)((vc_sin_tab[i] + 8) >> 4);
+    }
+    const unsigned AB = pal ? 2080 : 2104;              /* active line 52 / 52.6 us */
+    c->a0 = pal ? 420 : 376;                            /* 10.5 / 9.4 us after the sync edge */
+    c->segb = AB / c->nseg;
+    c->sgr = c->segb / S / c->P; if (!c->sgr) c->sgr = 1;
+    c->soff = (c->segb - c->sgr * c->P * S) / 2;
+    c->b0 = pal ? 238 : 227;                            /* central 70 % of the burst (5.6 + 2.25 / 5.3 + 2.5 us) */
+    const unsigned BL = pal ? 63 : 70;
+    c->bgr = BL / S / c->P; if (!c->bgr) c->bgr = 1;
+    c->boff = (BL - c->bgr * c->P * S) / 2;
+}
+/* phase of (re, im) in 2*pi/256 units: scaled to |component| <= 31, then the 6-bit/6-bit cell table of the discriminator */
+static unsigned vc_angle(int64_t re, int64_t im) {
+    while (re > 31 || re < -31 || im > 31 || im < -31) { re /= 2; im /= 2; }
+    while (re && im && re < 16 && re > -16 && im < 16 && im > -16) { re *= 2; im *= 2; }
+    return vf_atan_tab[((unsigned)re & 63u) | (((unsigned)im & 63u) << 6)];
+}
+static uint32_t vc_isqrt64(uint64_t v) {
+    uint64_t r = 0, b = 1ull << 62;
+    while (b > v) b >>= 2;
+    while (b) { if (v >= r + b) { v -= r + b; r = (r >> 1) + b; } else r >>= 1; b >>= 2; }
+    return (uint32_t)r;
+}
+/* P bins of the lag-S phase steps (+128) over g groups of P samples, starting at x (x[-S] must be readable) */
+DM_INLINE void vc_acc_t(const uint8_t *restrict x, const uint8_t *restrict tab, unsigned g, int32_t *restrict acc, const unsigned P, const unsigned S) {
+    int32_t a[11];
+    for (unsigned m = 0; m < P; m++) a[m] = 0;
+    unsigned p = tab[x[-(int)S]];
+    for (; g; g--, x += P * S) {
+        unsigned c[11];
+#pragma GCC unroll 11
+        for (unsigned m = 0; m < P; m++) c[m] = x[m * S];                  /* loads first (in-order core) */
+#pragma GCC unroll 11
+        for (unsigned m = 0; m < P; m++) c[m] = tab[c[m]];
+#pragma GCC unroll 11
+        for (unsigned m = 0; m < P; m++) { a[m] += (int32_t)((c[m] - p + 128u) & 255u); p = c[m]; }
+    }
+    for (unsigned m = 0; m < P; m++) acc[m] = a[m];
+}
+static void __attribute__((noinline)) VFP_ATTR vc_acc_9_1(const uint8_t *x, const uint8_t *t, unsigned g, int32_t *a) { vc_acc_t(x, t, g, a, 9, 1); }
+static void __attribute__((noinline)) VFP_ATTR vc_acc_9_2(const uint8_t *x, const uint8_t *t, unsigned g, int32_t *a) { vc_acc_t(x, t, g, a, 9, 2); }
+static void __attribute__((noinline)) VFP_ATTR vc_acc_11_1(const uint8_t *x, const uint8_t *t, unsigned g, int32_t *a) { vc_acc_t(x, t, g, a, 11, 1); }
+static void __attribute__((noinline)) VFP_ATTR vc_acc_11_2(const uint8_t *x, const uint8_t *t, unsigned g, int32_t *a) { vc_acc_t(x, t, g, a, 11, 2); }
+static void __attribute__((noinline)) VFP_ATTR vc_acc_9_4(const uint8_t *x, const uint8_t *t, unsigned g, int32_t *a) { vc_acc_t(x, t, g, a, 9, 4); }
+static void __attribute__((noinline)) VFP_ATTR vc_acc_11_4(const uint8_t *x, const uint8_t *t, unsigned g, int32_t *a) { vc_acc_t(x, t, g, a, 11, 4); }
+
+/* Window bytes [k - S, k + len) as one pointer (to byte k): directly, or copied into c->tmp if the range straddles
+ * the tail of the previous block and the current block.  NULL if outside the window. */
+static const uint8_t *vc_ptr(vc_t *c, const vf_t *s, int64_t k, unsigned len) {
+    const int64_t S = c->step, kb = s->cx_keepb;
+    if (k - S < 0 || k + len > s->cx_n) return NULL;
+    if (k - S >= kb) return s->cx_cur + (k - kb);
+    if (k + len <= kb) return s->cx_tail + k;
+    if (len + S > VC_TMP) return NULL;
+    for (int64_t j = k - S; j < k + (int64_t)len; j++) c->tmp[j - (k - S)] = j < kb ? s->cx_tail[j] : s->cx_cur[j - kb];
+    return c->tmp + S;
+}
+/* Mixed sum over gr groups from window byte k: re, im = sum_m (P*a_m - sum a) * exp(-j (theta_m + phoff)) (Q14 scale),
+ * runs of <= G groups, theta_m = oscillator phase at sample m of the run's centre group; phoff (Q32 cycles) rotates
+ * the result (the reference rotation is folded in here).  0 if outside the window. */
+static int VFP_ATTR vc_sum(vc_t *c, const vf_t *s, int64_t k, unsigned gr, uint32_t phoff, int64_t *re, int64_t *im) {
+    const unsigned S = c->step, P = c->P, len = gr * P * S;
+    const uint8_t *x = vc_ptr(c, s, k, len);
+    if (!x) return 0;
+    const uint32_t incs = c->incb * S;
+    int64_t sr = 0, si = 0;
+    while (gr) {
+        unsigned g = gr < c->G ? gr : c->G;
+        int32_t a[11];
+        switch (P * 4 + S) {
+        case 37: vc_acc_9_1(x, s->tab, g, a); break;
+        case 38: vc_acc_9_2(x, s->tab, g, a); break;
+        case 40: vc_acc_9_4(x, s->tab, g, a); break;
+        case 45: vc_acc_11_1(x, s->tab, g, a); break;
+        case 46: vc_acc_11_2(x, s->tab, g, a); break;
+        default: vc_acc_11_4(x, s->tab, g, a); break;
+        }
+        int32_t sum = 0; for (unsigned m = 0; m < P; m++) sum += a[m];
+        /* A - jB = sum_m v_m exp(-j m w_s) with the fixed Q10 bin weights (32 bit: |v| <= 64*255*11, 11 terms) */
+        int32_t A = 0, B = 0;
+        for (unsigned m = 0; m < P; m++) { int32_t v = a[m] * (int32_t)P - sum; A += v * c->wc[m]; B += v * c->ws[m]; }
+        /* run phase: oscillator at the first sample of the centre group (absolute byte k + (g-1)/2 groups), Q14 table */
+        uint32_t th = (uint32_t)(s->cx_abs0 + k) * c->incb + (uint32_t)((uint64_t)(g - 1) * P * incs / 2) + phoff + (1u << 23);
+        unsigned i = th >> 24; const int32_t cr = vc_sin_tab[(i + 64) & 255], cs = vc_sin_tab[i];
+        sr += (int64_t)cr * A - (int64_t)cs * B; si -= (int64_t)cs * A + (int64_t)cr * B;
+        x += g * P * S; k += g * P * S; gr -= g;
+    }
+    *re = (sr + 512) >> 10; *im = (si + 512) >> 10;       /* Q24 -> the Q14 scale of the reference formulas */
+    return 1;
+}
+static int8_t vc_q(int64_t x, int64_t inv, int64_t lim) {   /* round(x * inv / 2^46), clamped to int8 (|x| <= lim first) */
+    x = x > lim ? lim : x < -lim ? -lim : x;
+    int64_t v = (x * inv + (1ll << 45)) >> 46;
+    return (int8_t)(v > 127 ? 127 : v < -127 ? -127 : v);
+}
+/* Colour of one line (called by vf_lines for every line in order; e = sync edge, Q16 bins of the window) */
+static void DM_ATTR vc_line(vf_t *s, int64_t e, unsigned flags, int64_t t0_16) {
+    vc_t *c = s->vc;
+    const uint32_t lc = (uint32_t)s->line_ctr;
+    const int col = lc % c->every == 0 && !(flags & VF_F_VBI), pre = (lc + 1) % c->every == 0;
+    if (!col && !pre) return;
+    uint32_t c0 = DM_CYC();
+    if (c->std != s->std) { vc_setup(c, s->std); c->pb_ok = 0; }
+    const unsigned rec = VC_REC + 2 * c->nseg;
+    if (col && !pre) {                                   /* nothing to do if the record cannot be sent */
+        if (c->n >= c->max) { c->drop_full++; goto out; }
+        if (c->rate && c->bucket < (int32_t)rec) { c->drop_rate++; goto out; }
+    }
+    const int64_t pos = (e * 8) >> 16;                   /* window byte of the sync edge */
+    int64_t br, bi;
+    if (!vc_sum(c, s, pos + c->b0 + c->boff, c->bgr, 0, &br, &bi)) { c->drop_cut++; c->pb_ok = 0; goto out; }
+    const int32_t zr = (int32_t)(br >> 4), zi = (int32_t)(bi >> 4);
+    const int had = c->pb_ok && c->pb_lc + 1 == lc; const int32_t ppr = c->pbr, ppi = c->pbi;
+    if (pre) { c->pbr = zr; c->pbi = zi; c->pb_lc = lc; c->pb_ok = 1; c->pre++; }
+    if (!col || c->n >= c->max || (c->rate && c->bucket < (int32_t)rec)) {
+        if (col) { if (c->n >= c->max) c->drop_full++; else c->drop_rate++; }
+        goto out;
+    }
+    {
+        int32_t den = s->blank16 - s->tip16; if (den < 64) den = 64;
+        unsigned fl = (s->std == 2 ? VC_F_NTSC : 0) | (flags & VF_F_VLOCK ? VC_F_VLOCK : 0) | (flags & VF_F_FIELD2 ? VC_F_FIELD2 : 0);
+        /* reference phase (2*pi/256): the sum of this and the previous line's burst, else the last one */
+        unsigned ar;
+        if (had) { ar = vc_angle((int64_t)zr + ppr, (int64_t)zi + ppi); c->rang = ar; fl |= VC_F_REF2; c->ref2++; }
+        else ar = c->rang;
+        const unsigned ab = vc_angle(zr, zi);
+        /* rotation mapping the reference to +90 deg (rot = j conj(R)/|R|), folded into the oscillator phase of the
+         * segment sums: theta' = theta + (ar - 64) * 2^24.  PAL V switch: Re(burst * rot) < 0 <=> burst ahead of R. */
+        const uint32_t phoff = (uint32_t)((int32_t)ar - 64) << 24;
+        int vsw = 1;
+        if (s->std != 2 && (int8_t)(uint8_t)(ab - ar) > 0) { vsw = -1; fl |= VC_F_VNEG; }
+#ifdef VC_DEBUG
+        VC_DEBUG(lc, pos, zr, zi, ppr, ppi, had, vsw, s->cx_abs0);
+#endif
+        /* burst amplitude in luma steps: |S| / (P * bytes * den) */
+        const int64_t bb = (int64_t)c->P * c->bgr * c->P * c->step * den;
+        uint32_t ba = (uint32_t)(((uint64_t)vc_isqrt64((uint64_t)(br >> 4) * (uint64_t)(br >> 4) + (uint64_t)(bi >> 4) * (uint64_t)(bi >> 4)) * 16 * c->gc / 4096 + (uint64_t)bb / 2) / (uint64_t)bb);
+        if (ba > 255) ba = 255;
+        if (ba < 4) { fl |= VC_F_WEAK; c->weak++; }
+        const int64_t D = (int64_t)c->P * c->sgr * c->P * c->step * den, inv = ((1ll << 46) / D) * c->gc / 4096, lim = 128 * D;
+        uint8_t *o = c->out + c->n * rec;
+        const unsigned ln = (flags & VF_F_VLOCK) ? s->lineno : 0;
+        const uint32_t t16 = (uint32_t)(t0_16 + ((e * 209715) >> 32));
+        o[0] = (uint8_t)ln; o[1] = (uint8_t)(ln >> 8); o[2] = (uint8_t)fl; o[3] = (uint8_t)ba;
+        o[4] = (uint8_t)t16; o[5] = (uint8_t)(t16 >> 8); o[6] = (uint8_t)(t16 >> 16); o[7] = (uint8_t)(t16 >> 24);
+        o[8] = (uint8_t)ab; o[9] = (uint8_t)ar;
+        int8_t *uv = (int8_t *)(o + VC_REC);
+        for (unsigned j = 0; j < c->nseg; j++) {
+            int64_t xr, xi;                                  /* S * rot */
+            if (!vc_sum(c, s, pos + c->a0 + (int64_t)j * c->segb + c->soff, c->sgr, phoff, &xr, &xi)) { xr = xi = 0; }
+            uv[2 * j] = vc_q(-xi, inv, lim);                  /* U = -2 Im / ... */
+            uv[2 * j + 1] = vc_q(vsw > 0 ? xr : -xr, inv, lim);
+        }
+        if (c->rate) c->bucket -= (int32_t)rec;
+        c->n++; c->lines++;
+    }
+out:
+    s->cyc_color += DM_CYC() - c0;
 }
 
 /* One block of n raw words (n multiple of B): gap_in = input samples missing
@@ -333,7 +561,7 @@ static unsigned DM_ATTR vf_block(vf_t *s, const uint32_t *w, unsigned n, uint32_
  * PARLIO windows: the next window starts with the tail of this one).  c1 = cycle stamp after the discriminator. */
 static unsigned DM_ATTR vf_lines(vf_t *s, unsigned nb, int64_t t0_16, uint8_t *out, unsigned max_lines, int64_t defer, uint32_t c1) {
     const int64_t nb16 = (int64_t)nb << 16;
-    unsigned nl = 0; uint32_t slice_cyc = 0;
+    unsigned nl = 0; uint32_t slice_cyc = 0; const uint64_t col0 = s->cyc_color;
     if (!s->locked) {
         int64_t f = vf_acquire(s, nb);
         if (f < 0) { s->acq_wait = 3; s->cyc_sync += DM_CYC() - c1; return 0; }
@@ -417,13 +645,14 @@ static unsigned DM_ATTR vf_lines(vf_t *s, unsigned nb, int64_t t0_16, uint8_t *o
             nl++; s->l_out++;
             slice_cyc += DM_CYC() - q0;
         } else s->l_drop_rate++;
+        if (s->vc && s->src) vc_line(s, e, flags, t0_16);         /* colour (PARLIO windows only, see vf_block_p8) */
         s->pred = s->blk0 + e + T; s->line_ctr++;
         if (s->vlocked) s->lineno = s->lineno % nlines + 1;
         s->since_vs++;
         if (s->miss_run > 48) { s->locked = 0; s->vlocked = 0; s->relocks++; break; }
     }
     uint32_t c2 = DM_CYC();
-    s->cyc_slice += slice_cyc; s->cyc_sync += (c2 - c1) - slice_cyc;
+    s->cyc_slice += slice_cyc; s->cyc_sync += (c2 - c1) - slice_cyc - (uint32_t)(s->cyc_color - col0);
     s->done16 = s->pred;
     return nl;
 }
@@ -473,14 +702,23 @@ static unsigned DM_ATTR vf_block_p8(vf_t *s, const uint8_t *x, unsigned n, uint3
         s->bucket += (int32_t)(((uint64_t)(n + gap_in) * s->rate_Bps) / 40000000u);
         if (s->bucket > 8192) s->bucket = 8192;
     }
+    if (s->vc && s->vc->rate) {
+        s->vc->bucket += (int32_t)(((uint64_t)(n + gap_in) * s->vc->rate) / 40000000u);
+        if (s->vc->bucket > 8192) s->vc->bucket = 8192;
+    }
     if (!s->locked && s->acq_wait) { s->acq_wait--; s->prev_n = 0; s->pinit = 1; s->sabs += n; return 0; }   /* searching: every 4th block */
     if (s->pinit) { s->pphase = s->tab[x[3]]; s->pinit = 0; }
     vf_disc_p8(x, nbn, s->tab, &s->pphase, s->bins + keep);
     const unsigned nb = keep + nbn;
     s->bins[nb] = 0;
+    /* colour: raw bytes of this window (the keep bins are the last keep * 8 bytes of the previous block) */
+    s->cx_cur = x; s->cx_keepb = keep * 8; s->cx_tail = keep ? s->px_prev + s->px_prev_n - keep * 8 : x;
+    s->cx_n = keep * 8 + n; s->cx_abs0 = s->sabs - (int64_t)keep * 8;
     s->prev_n = nb; s->sabs += n;
     uint32_t c1 = DM_CYC(); s->cyc_disc += c1 - c0;
-    return vf_lines(s, nb, t0_16 - (int64_t)keep * 16 / 5, out, max_lines, (int64_t)s->T16 + (3 << 16), c1);
+    unsigned nl = vf_lines(s, nb, t0_16 - (int64_t)keep * 16 / 5, out, max_lines, (int64_t)s->T16 + (3 << 16), c1);
+    s->px_prev = x; s->px_prev_n = n;
+    return nl;
 }
 
 /* ================================================================== GFSK */

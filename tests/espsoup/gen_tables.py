@@ -38,6 +38,13 @@ out.append("};")
 # 30103 * log2(1 + j/64), j = 0..64 (for 100*10*log10)
 lt = [int(math.floor(30103 * math.log2(1 + j / 64) + 0.5)) for j in range(65)]
 out.append("static const int16_t dm_lt[65] = {" + ",".join(map(str, lt)) + "};")
+# VFM colour (VFMCOLOR): sine of k * 2*pi/256 in Q14 (subcarrier mixer weights)
+st = [int(math.floor(16384 * math.sin(2 * math.pi * k / 256) + 0.5)) for k in range(256)]
+out.append("/* VFM colour: 16384 * sin(2*pi*k/256) */")
+out.append("static const int16_t vc_sin_tab[256] = {")
+for r in range(0, 256, 32):
+    out.append("    " + ",".join(str(x) for x in st[r:r + 32]) + ",")
+out.append("};")
 dst = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parents[2] / "main/families/c5_c6_c61/demod_tab.h"
 dst.write_text("\n".join(out) + "\n", newline="\n")
 print("ok", sum(tab))

@@ -9,7 +9,9 @@
  *   demod_host vfm  in.u32 out.bin fin words gap D px std pol sel rate_Bps
  *   demod_host gfsk in.u32 out.bin fin words gap R sps mode len sync nbits maxerr chan okonly
  *   demod_host vfm1 / gfsk1 ...   same, but one single block (= VFMDATA / GFDATA on the device)
- *   demod_host vfmp in.u8 out.bin 0 bytes gap D px std pol sel rate_Bps   PARLIO bytes at 40 MS/s (vf_block_p8)
+ *   demod_host vfmp in.u8 out.bin 0 bytes gap D px std pol sel rate_Bps [cseg every step col.bin]
+ *                                                     PARLIO bytes at 40 MS/s (vf_block_p8), optional colour records
+ *                                                     (VFMCOLOR: per record [u32 block][VC_REC + 2 * cseg]) to col.bin
  *
  * VFM output: per line [u32 block][VF_REC + px record].
  * GFSK output: per packet [u32 block][u32 pos][u16 n][u8 flags][u8 errs][i16 rssi10][i32 cfo][i32 dev] + n bytes.
@@ -46,15 +48,29 @@ int main(int argc, char **argv) {
         if (!vf_init(&s)) { fprintf(stderr, "bad vfm config\n"); return 2; }
         s.tab = vf_ptab; s.bins = malloc(sizeof(int16_t) * (VFP_KEEP + words / 8 + 4)); s.maxruns = 1024; s.runs = malloc(sizeof(vf_run_t) * s.maxruns);
         unsigned maxl = (VFP_KEEP + words / 8) / 300 + 4; uint8_t *out = malloc(maxl * (VF_REC + s.px));
+        static vc_t vc; FILE *fc = NULL; unsigned crec = 0;
+        if (argc > 16 && atoi(argv[13]) > 0) {
+            memset(&vc, 0, sizeof(vc)); vc.nseg = atoi(argv[13]); vc.every = atoi(argv[14]); vc.step = atoi(argv[15]);
+            if (!vc_init(&vc)) { fprintf(stderr, "bad colour config\n"); return 2; }
+            crec = VC_REC + 2 * vc.nseg; vc.max = maxl; vc.out = malloc(maxl * crec); s.vc = &vc;
+            fc = fopen(argv[16], "wb");
+        }
         uint32_t blk = 0; size_t pos = 0; unsigned g = 0;
         while (pos + words <= nx) {
             int64_t t16 = (int64_t)pos * 2 / 5;                 /* 40 MS/s: 2/5 of 1/16 us per byte */
+            if (s.vc) vc.n = 0;
             unsigned nl = vf_block_p8(&s, x + pos, words, g, t16, out, maxl);
             for (unsigned j = 0; j < nl; j++) { fwrite(&blk, 4, 1, fo); fwrite(out + j * (VF_REC + s.px), 1, VF_REC + s.px, fo); }
+            if (fc) for (unsigned j = 0; j < vc.n; j++) { fwrite(&blk, 4, 1, fc); fwrite(vc.out + j * crec, 1, crec, fc); }
             pos += words + gap; g = gap; blk++;
         }
         printf("VFM blocks %u lines %u sync %u fly %u out %u drop_rate %u drop_cut %u vbi %u vsyncs %u relocks %u acq %u pol %d std %d qs %u tip16 %d blank16 %d T16 %d\n",
                s.blocks, s.lines, s.l_sync, s.l_fly, s.l_out, s.l_drop_rate, s.l_drop_cut, s.l_vbi, s.vsyncs, s.relocks, s.acq, s.pol, s.std, s.qs, s.tip16, s.blank16, s.T16);
+        if (fc) {
+            printf("VFC lines %u ref2 %u weak %u drop_rate %u drop_full %u drop_cut %u pre %u P %u G %u segb %u sgr %u cyc %llu\n", vc.lines, vc.ref2, vc.weak,
+                   vc.drop_rate, vc.drop_full, vc.drop_cut, vc.pre, vc.P, vc.G, vc.segb, vc.sgr, (unsigned long long)s.cyc_color);
+            fclose(fc);
+        }
     } else if (!strncmp(mode, "vfm", 3)) {
         vf_t s; memset(&s, 0, sizeof(s));
         s.fin = fin; s.D = atoi(argv[7]); s.px = atoi(argv[8]); s.std_force = atoi(argv[9]); s.pol_force = atoi(argv[10]);
