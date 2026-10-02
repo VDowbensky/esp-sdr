@@ -8,13 +8,15 @@
  * tokens (c5_opt_caps.h).  Receive only: nothing here enables the transmitter.
  *
  *   c5_engine.h  register-level capture engine, BIGCAP, CAPT, FREQK, TEMP
+ *   c5_dsp.h     DDC snapshots, SPEC (3 arguments) / SWEEP power spectra
  *
  * See docs/espsoup-c5.md for the protocol, measurements and limitations.
  */
 #pragma once
 #include "c5_engine.h"
+#include "c5_dsp.h"
 
 static bool opt_command(char *line) {
     if (!strcmp(line, "FWOPT?")) { reply("FWOPT " FWOPT_VERSION " espsoup rx-only C5\n"); return true; }
-    return engine_command(line);
+    return engine_command(line) || dsp_command(line);
 }
