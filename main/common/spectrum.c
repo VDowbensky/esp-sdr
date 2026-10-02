@@ -25,6 +25,12 @@
 #if CONFIG_IDF_TARGET_ESP32C2
 /* Quiescent during RF capture; keep heap/stacks in the other SRAM banks. */
 #define SPEC_STORAGE __attribute__((section(".c2_spectrum"),aligned(16)))
+#elif CONFIG_IDF_TARGET_ESP32C5
+/* The C5 extensions need the SRAM below the dump bank. The workspace lives in
+ * the upper quarter of the dump bank, above every spectrum snapshot; longer
+ * captures and continuous runs may overwrite it, so it is rebuilt per run. */
+#define SPEC_STORAGE __attribute__((section(".c5_spectrum"),aligned(16)))
+#define SPEC_REBUILD_WORKSPACE 1
 #else
 #define SPEC_STORAGE
 #endif
@@ -105,6 +111,9 @@ bool spectrum_command(const char *line, unsigned frequency_mhz, spectrum_acquire
        !rate_hz(rate) || n<256 || n>MAX_FFT || (n&(n-1))) {
         send_text("ERR spec_args\n");return true;
     }
+#ifdef SPEC_REBUILD_WORKSPACE
+    dsps_fft2r_deinit_sc16();ready=false;setup_n=0;
+#endif
     spectrum_fft_init();
     if(!ready) {send_text("ERR spectrum_memory\n");return true;}
     if(setup_n!=n) {

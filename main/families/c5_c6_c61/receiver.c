@@ -246,7 +246,7 @@ void app_main(void) {
     ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&usb));
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     wifi_init_config_t cfg=WIFI_INIT_CONFIG_DEFAULT();
-#if CONFIG_IDF_TARGET_ESP32C61 || CONFIG_IDF_TARGET_ESP32C6
+#if CONFIG_IDF_TARGET_ESP32C61 || CONFIG_IDF_TARGET_ESP32C6 || CONFIG_IDF_TARGET_ESP32C5
     cfg.static_rx_buf_num=4;
 #endif
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
