@@ -81,7 +81,7 @@ transport before offering this mode.
 | ESP32 | — | 256–2048 bins; 16/40/80 MS/s; UART |
 | ESP32-C2 | — | 256–2048 bins; 80/40/16 MS/s; UART |
 | ESP32-C3 | 256 bins; 80 MS/s; native USB | 512–2048 bins over USB; 256–2048 over UART |
-| ESP32-C5 | — | 256–2048 bins; 4/8/10/20/40/80 MS/s |
+| ESP32-C5 | — (see [C5 extensions](#esp32-c5-extensions-espsoup)) | 256–2048 bins; 4/8/10/20/40/80 MS/s |
 | ESP32-C6 | 256 bins; 80 MS/s; native USB | 512–2048 bins over USB; 256–2048 over UART |
 | ESP32-H2 | — | 256–2048 bins; 6.4/10.667/16/32 MS/s; USB or UART |
 | ESP32-C61 | 256 bins; 4/8/10/20/40/80 MS/s; native USB | 512/1024 bins over USB; 256–1024 over UART |
@@ -102,6 +102,38 @@ continuous bank rotation, and portable snapshot FFTs.
 See [spectrum protocol and hardware validation](docs/spectrum.md) for the
 wire format, limitations and test results. The S3 ring diagnostic host tool
 is [tools/s3_ring.py](tools/s3_ring.py).
+
+<a id="esp32-c5-extensions-espsoup"></a>
+
+## ESP32-C5 extensions (ESPsoup)
+
+The C5 receiver has additional, receive-only features that are announced by
+their own `CAPS` tokens; every upstream command and reply is unchanged:
+
+- **Faster captures and BIGCAP:** a register-level capture engine removes the
+  fixed ~1.7 ms stall of the vendor `adctrig()` per snapshot (80 MS/s capture
+  1886 → 206 µs; also speeds up the snapshot FFTs) and allows contiguous
+  snapshots of up to 32,704 samples (8.2 ms at 4 MS/s). `CAPT16/CAPT20` add
+  boot-time timestamps.
+- **On-device DSP:** anti-aliased decimated snapshots (`DDC8/DDC16`, 9–13 dB
+  lower alias floor than the sample-dropping 4/8 MS/s rates), averaged power
+  spectra and a device-side panorama (`SWEEP 100 6000 40 …` in 0.69 s),
+  1 kHz tuning steps (`FREQK`), on-chip temperature (`TEMP?`).
+- **Continuous capture:** back-to-back dumps with exact gap accounting process
+  91–96 % of all samples at 4–10 MS/s: decimated I/Q streams (`STREAM8/16`),
+  continuous spectrograms (`CSPEC`), a burst catcher (`CPKT`) and a time grid
+  for two boards that cover each other's gaps (`CGRID`).
+- **Tuning to 5990 MHz:** above 3 GHz the C5 tunes through the Wi-Fi driver
+  channel path by default (`TUNEM`), which receives UNII-3 and ITS-G5
+  (5.85–5.925 GHz) where the stock path loses ~20 dB above ~5.75 GHz.
+- **On-device demodulators:** an FM-video line stream for analog FPV (`VFM`,
+  full PAL line rate of 15,625 lines/s) and a GFSK packet catcher with BLE
+  de-whitening and CRC (`GFSK`).
+- **Gap-free 40 MS/s path:** the modem diagnostic bus routed through the GPIO
+  matrix into PARLIO RX gives 4+4-bit samples without gaps (`PARLIO`), plus a
+  C5 port of the S31 hardware DC calibration (`DCCAL`).
+
+See [ESP32-C5 extensions: protocol, measurements and limitations](docs/espsoup-c5.md).
 
 ## Commands and transport
 
@@ -171,6 +203,9 @@ See [H2 backend and validation](docs/esp32h2.md).
   comes from the selected target directory.
 - `main/common/`: burst serial transport, gain control, limits, and bandwidth
   helpers. The gain-table wrapper is linked only for C61 and S31.
+- `main/families/c5_c6_c61/c5_*.h`, `cspec_dsp.h`, `demod_*.h`, `dc_cal.h`,
+  `parlio_cap.h`: the C5 extensions (included by the shared receiver for C5 only);
+  their host tests live in `tests/espsoup/` and `tests/test_espsoup_c5.py`.
 - `main/diagnostics/`: optional register probes, excluded from release exports.
 - `platform/esp32s2/`: pinned ROM USB CDC compatibility component.
 
@@ -202,7 +237,10 @@ validated.
 - **C2:** 80/40/16 MS/s; up to 8,190 complex samples; approximately 12–20 MHz analog bandwidth.
 - **H2:** 32/16/10.667/6.4 MS/s; approximately 4–11 MHz analog bandwidth; up to 16,380 complex samples.
 - **C3:** 80 MS/s; 14–62 MHz analog bandwidth.
-- **C5:** 11–48 MHz bandwidth; selects its 5 GHz RF path above 3000 MHz.
+- **C5:** 11–48 MHz bandwidth; selects its 5 GHz RF path above 3000 MHz;
+  above 3000 MHz the Wi-Fi driver channel path is used by default (`TUNEM`, see
+  [C5 extensions](docs/espsoup-c5.md#tuning-tunem)). Measured exact tuning:
+  about 2130–2730 and 4790–5990 MHz; below about 2.1 GHz the LO does not follow.
 - **C61:** 80/40/20/10/8/4 MS/s; 13–54 MHz bandwidth.
 - **C6:** 80 MS/s; 12–54 MHz bandwidth.
 - **S2:** 80/40/16 MS/s; 15–60 MHz bandwidth; up to 12,284 complex samples.
@@ -230,6 +268,13 @@ See [receive-control details](docs/rx-controls.md).
         <img src="https://github.com/zodoczi.png?size=160" width="80" height="80" alt="Zoltan Doczi"><br>
         <b>Zoltan Doczi</b>
       </a>
+    </td>
+    <td align="center">
+      <a href="https://github.com/pit711">
+        <img src="https://github.com/pit711.png?size=160" width="80" height="80" alt="Peter Holzhauser"><br>
+        <b>Peter Holzhauser</b>
+      </a><br>
+      <sub>ESPsoup: ESP32-C5 extensions</sub>
     </td>
   </tr>
 </table>
