@@ -12,6 +12,7 @@
  *   c5_cont.h    continuous engine: STREAM, CSPEC, CPKT, CGRID, CSTAT
  *   c5_demod.h   on-device VFM video and GFSK packet demodulators
  *   dc_cal.h     hardware DC-offset calibration (port of the S31 dc.c)
+ *   parlio_cap.h gap-free 40 MS/s 4+4-bit path via MODEM_DIAG -> PARLIO RX
  *
  * See docs/espsoup-c5.md for the protocol, measurements and limitations.
  */
@@ -21,9 +22,11 @@
 #include "c5_cont.h"
 #include "c5_demod.h"
 #include "dc_cal.h"
+#include "parlio_cap.h"
 
 static bool opt_command(char *line) {
     dm_release_unless_vector(line);
     if (!strcmp(line, "FWOPT?")) { reply("FWOPT " FWOPT_VERSION " espsoup rx-only C5\n"); return true; }
-    return engine_command(line) || dsp_command(line) || dccal_command(line) || cont_command(line) || demod_command(line);
+    return engine_command(line) || dsp_command(line) || dccal_command(line) || parlio_command(line) ||
+           cont_command(line) || demod_command(line);
 }

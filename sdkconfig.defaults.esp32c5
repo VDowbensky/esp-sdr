@@ -31,3 +31,9 @@ CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=4
 # main task for seconds without yielding; the task watchdog would print a
 # register dump into the USB stream. Host stalls end a run via its own timeout.
 # CONFIG_ESP_TASK_WDT_EN is not set
+# The GDMA/PARLIO driver code stays in flash: in IRAM (~4.4 KB) it pushed the
+# largest heap block below the 48 KiB the continuous engine needs.
+# CONFIG_GDMA_CTRL_FUNC_IN_IRAM is not set
+# CONFIG_GDMA_ISR_HANDLER_IN_IRAM is not set
+# CONFIG_PARLIO_TX_ISR_HANDLER_IN_IRAM is not set
+# CONFIG_PARLIO_RX_ISR_HANDLER_IN_IRAM is not set
