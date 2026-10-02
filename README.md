@@ -1,3 +1,60 @@
+# ESPsoup firmware (ESP-SDR fork for the ESP32-C5)
+
+This is **ESPsoup firmware**, a fork of [ESPARGOS ESP-SDR](https://github.com/ESPARGOS/esp-sdr)
+with receive-only extensions for the **ESP32-C5**. It is the firmware behind the
+ESPsoup SDR app, and it stays compatible with the upstream protocol and the
+[ESP-SDR browser viewer](https://espargos.net/espsdr/app/): every upstream
+command and reply is unchanged, new features are announced by new `CAPS`
+tokens. All other chips build exactly as upstream.
+
+| ESP32-C5 feature | Commands (CAPS) | Measured |
+| --- | --- | --- |
+| Register-level capture engine (no 1.7 ms vendor stall) | all captures, upstream `SPEC` snapshots | 80 MS/s capture 1886 → 206 µs |
+| Long contiguous snapshots | `CAP*` up to 32,704 samples (`BIGCAP`), `CAPT16/20` timestamps | 8.2 ms at 4 MS/s |
+| Anti-aliased decimation | `DDC8/DDC16` | 9–13 dB lower alias floor |
+| On-device spectra / panorama | `SPEC <rate> <nfft> <navg>` (`SPECDB`), `SWEEP` | 100–6000 MHz in 0.69 s |
+| Continuous capture with exact gap accounting | `STREAM8/16`, `CSPEC`, `CPKT`, `CGRID`, `CSTAT?` | 91–96 % of all samples at 4–10 MS/s |
+| 5 GHz tuning via the Wi-Fi driver path | `TUNEM` | exact 4790–5990 MHz (stock path −20 dB above ~5.75 GHz) |
+| FM-video demodulator (analog FPV) | `VFM` (`DEMODFM`) | 15,625 PAL lines/s, 100 % duty on PARLIO |
+| GFSK / BLE packet catcher | `GFSK` (`GFSKPKT`) | 62–78 CRC-valid BLE adverts/s per channel |
+| Gap-free 40 MS/s 4+4-bit path | `PCAP`, `PRUN`, `VFMSRC`, `STRSRC` (`PARLIO`) | 62 s, 2.48·10⁹ bytes, 0 overruns |
+| Hardware DC calibration (port of the S31 `dc.c`) | `DCCAL`, `DCAUTO` | 5 GHz DC −27…−47 dB |
+| 1 kHz tuning steps, temperature | `FREQK`, `TEMP?` | |
+
+Supported boards: ESP32-C5 boards with native USB (tested: ESP32-C5-DevKitC-1
+type boards and the Seeed Studio XIAO ESP32-C5), 2 MB flash or more.
+Version: `FWOPT?` → `FWOPT 0.7.0 espsoup rx-only C5`.
+
+* Protocol, measurements and limitations: [docs/espsoup-c5.md](docs/espsoup-c5.md)
+* License: GPL-3.0 (ESP-SDR is GPL-3.0-or-later; see [NOTICE](NOTICE) for the
+  ESPsoup additions and the note on C5VRX-inspired parts)
+* Thanks to Florian Euchner, Zoltan Doczi and everyone at
+  [ESPARGOS](https://espargos.net/) for ESP-SDR and for releasing it under the GPL.
+
+### Build and flash the ESPsoup C5 firmware
+
+Use the ESP-IDF commit pinned for `esp32c5` in [firmware-targets.json](firmware-targets.json),
+then build like any other profile:
+
+```sh
+git submodule update --init
+idf.py -B build-c5 -DIDF_TARGET=esp32c5 -DSDKCONFIG=sdkconfig.c5 \
+  -DSDKCONFIG_DEFAULTS=sdkconfig.defaults.esp32c5 build
+idf.py -B build-c5 -p /dev/ttyACM0 flash
+```
+
+On Windows PowerShell quote the `-D` arguments (`"-DIDF_TARGET=esp32c5"`).
+`python tools/espsoup_release.py --build-dir build-c5 --version 0.7.0 --output release`
+packages a build (bootloader, partition table, application, `manifest.json`,
+`flash_args`, `SHA256SUMS`). A release can be flashed with
+`python -m esptool --chip esp32c5 -p PORT -b 921600 write-flash @flash_args`;
+back up the old flash first (`read-flash 0 ALL backup.bin`). Distribute
+binaries only together with the corresponding source (GPL).
+
+The upstream ESP-SDR documentation follows.
+
+---
+
 # ESP-SDR firmware
 
 <img src="docs/espargos-logo.png" width="40%" align="right" alt="ESPARGOS logo">

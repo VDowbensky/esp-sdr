@@ -1,0 +1,58 @@
+ESPsoup firmware
+================
+
+ESPsoup firmware is a fork of ESP-SDR by ESPARGOS
+(https://github.com/ESPARGOS/esp-sdr), which is licensed under the GNU General
+Public License, version 3 or (at your option) any later version
+(GPL-3.0-or-later). The full license text is in LICENSE.
+
+  ESP-SDR:            Copyright (C) ESP-SDR contributors (ESPARGOS)
+  ESPsoup additions:  Copyright (C) 2026 ESPsoup contributors / Peter Holzhauser
+
+The ESPsoup additions (the ESP32-C5 extensions described in
+docs/espsoup-c5.md and the files marked "ESPsoup contributors") are licensed
+under GPL-3.0-or-later, like the rest of ESP-SDR.
+
+Ported and inspired parts
+-------------------------
+
+* main/families/c5_c6_c61/dc_cal.h is a port of receiver_dc_calibrate() from
+  main/targets/esp32s31/streaming/dc.c of ESP-SDR (ESPARGOS,
+  GPL-3.0-or-later) to the ESP32-C5.
+
+* The gap-free PARLIO capture path (main/families/c5_c6_c61/parlio_cap.h:
+  routing the modem diagnostic signals to pads via the GPIO matrix and reading
+  them back with PARLIO RX, muting the Wi-Fi promiscuous filter during a run)
+  and the TUNEM 5 call sequence in main/targets/esp32c5/tuning.h follow ideas
+  of the C5VRX project by konradit, which is licensed GPL-3.0-only. These
+  parts are an independent implementation; no C5VRX code was copied.
+  Should any part nevertheless be considered derived from C5VRX, that part is
+  covered by GPL-3.0-only. GPL-3.0-only and GPL-3.0-or-later code can be
+  combined; the combined work is then distributed under the terms of the GNU
+  GPL version 3. ESPsoup binary releases are therefore distributed under
+  GPL-3.0.
+
+Third-party components
+----------------------
+
+Third-party components keep their own licenses and copyright notices, in
+particular the Apache-2.0 ESP-IDF compatibility code in
+platform/esp32s2/esp_usb_cdc_rom_console/, the ESP-DSP component in
+components/esp-dsp (Apache-2.0, see components/esp-dsp/LICENSE) and the
+FFT kernels derived from ESP-DSP in main/targets/esp32s3/s3_fft_rnd.S and
+main/targets/esp32s31/burst/s31_fft_rnd.S. Binary builds also contain
+ESP-IDF including Espressif's binary Wi-Fi/PHY libraries (Apache-2.0).
+
+Source code for binaries
+------------------------
+
+Whoever distributes ESPsoup firmware binaries must also make the
+corresponding source code available under the GPL (GPLv3 section 6), for
+example the tagged commit of this repository that the binary was built from
+and the pinned ESP-IDF revision listed in firmware-targets.json.
+
+Trademarks
+----------
+
+ESP32 is a trademark of Espressif Systems. ESPsoup is not affiliated with or
+endorsed by Espressif Systems or ESPARGOS.
