@@ -14,8 +14,9 @@ announced by new `CAPS` tokens. Clients that do not know the tokens (for
 example the upstream browser viewer) see an ordinary C5 burst receiver.
 Nothing here enables the transmitter.
 
-Version: `FWOPT?` → `FWOPT 0.7.0 espsoup rx-only C5`. Internal development
-versions 0.3–0.6 preceded this first public version; their results are
+Version: `FWOPT?` → `FWOPT 0.7.1-dev espsoup rx-only C5` (0.7.0 + coarse colour
+for the FM-video stream, [VFMCOLOR](#colour-vfmcolor)). Internal development
+versions 0.3–0.6 preceded the first public version 0.7.0; their results are
 summarised below.
 
 Contents: [Compatibility](#compatibility) · [Hardware findings](#hardware-findings) ·
@@ -23,12 +24,13 @@ Contents: [Compatibility](#compatibility) · [Hardware findings](#hardware-findi
 [Continuous engine](#continuous-engine) · [Tuning (TUNEM)](#tuning-tunem) ·
 [On-device demodulators](#on-device-demodulators) ·
 [DC calibration](#hardware-dc-calibration) · [PARLIO path](#gap-free-parlio-path) ·
+[Colour](#colour-vfmcolor) ·
 [Limitations](#limitations) · [Testing](#testing) · [Sources](#sources-and-attribution)
 
 ## Compatibility
 
 * `INFO` stays `C5SDR 6 burst 16380`. `CAPS` additionally contains
-  `BIGCAP CAPT TEMP FREQK FWOPT DDC SPECDB SWEEP STREAM CONT CSPEC CGRID CPKT TUNEM DEMODFM GFSKPKT DCCAL PARLIO`.
+  `BIGCAP CAPT TEMP FREQK FWOPT DDC SPECDB SWEEP STREAM CONT CSPEC CGRID CPKT TUNEM DEMODFM GFSKPKT DCCAL PARLIO VFMCOLOR`.
 * `LIMITS?` keeps all upstream keys and adds `maxSamples` (32704), `stream`,
   `cspec`, `ddc`, `spec`, `freqStepHz` (1000) and `lockMHz`
   (`[[2130,2730],[4790,5990]]`, the measured exact-tuning ranges).
@@ -121,7 +123,7 @@ All new commands are listed in `CAPS` by the token in brackets. Rate index
 | `SWEEP <f0> <f1> <step> <rate_idx> <nfft> <navg>` [SWEEP] | per step `SWP mhz nfft crc us` + bins, then `END SWEEP steps us` | ≤ 2000 steps, any byte stops |
 | `FREQK <kHz>` / `FREQK?` [FREQK] | `OK` / `FREQK <kHz>` | 1 kHz steps (integer MHz + LO offset); `FREQ` resets the offset |
 | `TEMP?` [TEMP] | `TEMP 43.9` | on-chip sensor |
-| `FWOPT?` [FWOPT] | `FWOPT 0.7.0 espsoup rx-only C5` | |
+| `FWOPT?` [FWOPT] | `FWOPT 0.7.1-dev espsoup rx-only C5` | |
 | `ENGINE STOCK/FAST`, `ENGINE?` | `OK` | STOCK = vendor `adctrig()` for ≤ 16380 samples (A/B comparison) |
 | `STREAM8/STREAM16 <out_hz> [<offset_hz> [<n_max> [<dcblock> [<hw_idx>]]]]` [STREAM] | `OK STREAM rate bits hw R1 R2 taps words`, frames `BLK seq idx n crc t_us gap_in` + payload, `END STREAM frames samples lost_in overruns why` | 1 k–500 kS/s, default hardware rate 8 MS/s; `gap_in` = input samples missing before the frame |
 | `CSPEC <rate_idx> <nfft> <navg> [<mode> [<stride>]]` [CSPEC] | `OK CSPEC fs nfft navg mode words lines`, per block `SPL seq t_us lines nfft mode gap crc` + lines × nfft u8, `END CSPEC seq blocks lost overruns why` | nfft 16–256, mode 0 mean / 1 max (default) / 2 both; u8 = 2·10·log10(\|X\|²) (0.5 dB) + 12·sh (sh = log2(nfft)−6 for nfft > 64) |
@@ -130,6 +132,8 @@ All new commands are listed in `CAPS` by the token in brackets. Rate index
 | `CSTAT?` [CONT] | `CSTAT blocks words lost maxgap duty slips late copy wait work fft lines` | last continuous run, cycles per block |
 | `TUNEM <0,2,3,4,5>` / `TUNEM?` [TUNEM] | `OK` / `TUNEM n` | tuning path, default 4 (auto) |
 | `VFM <rate_idx 2/3> [<D> [<px> [<std> [<pol> [<sel> [<kBps>]]]]]]` [DEMODFM] | see [VFM](#vfm--fm-video-line-stream) | |
+| `VFM … <kBps> <cseg> [<every> [<step>]]` [VFMCOLOR] | additional `VFC` colour frames, see [Colour](#colour-vfmcolor) | PARLIO source only |
+| `VCDATA [<VFM args>]` [VFMCOLOR] | `PDATA …` + `VCX …` | diagnostic: snapshot + device luma/colour records (bit-exact check) |
 | `GFSK <rate_idx> <R> <kbps> <mode> [<len> [<sync_hex> [<nbits> [<maxerr> [<chan> [<okonly>]]]]]]` [GFSKPKT] | see [GFSK](#gfsk--packet-catcher) | |
 | `DSTAT?` | statistics of the last VFM/GFSK run | |
 | `DCCAL`, `DCCAL?`, `DCAUTO 0/1` [DCCAL] | `DCCAL before i q after i q base i q best i q steps n jac a b c d auto x` | [DC calibration](#hardware-dc-calibration) |
@@ -492,6 +496,162 @@ window the tone SNR is within 1 dB of the 10-bit dump; outside ±10 MHz the
 heap block dropped to 47 KB and STREAM/CSPEC fell back to 4096-word blocks;
 the C5 defaults keep that code in flash (only the discriminator is in IRAM).
 
+## Colour (VFMCOLOR)
+
+Version 0.7.1-dev adds a coarse colour channel to the PARLIO `VFM` stream. The
+luma stream is unchanged; colour is requested per run with extra `VFM`
+arguments and travels in separate `VFC` frames, so clients that do not ask for
+it see exactly the old protocol.
+
+**Why it was missing.** The colour subcarrier (PAL 4.43361875 MHz, NTSC
+3.579545 MHz) is a frequency modulation of the FM carrier at that rate; the
+0.2 µs luma bins average it away, and raw samples (≈11 MB/s even at 4+4 bit)
+do not fit through USB full speed.
+
+**Method** (`vc_*` in `demod_dsp.h`, integer only, host build bit-exact):
+
+* For selected lines the phase steps of the raw PARLIO bytes (lag `step` = 1, 2
+  or 4 bytes, the same 256-entry phase table as the luma path) are mixed with a
+  subcarrier oscillator whose phase is the *absolute* byte index × fsc/40 MHz
+  (one phase-continuous oscillator for the whole run) and summed over the
+  burst (central 70 %) and over `nseg` segments of the active line.
+* Cheap mixing: 9 bytes are 0.9976 PAL subcarrier cycles (NTSC: 11 bytes =
+  0.984 cycles), so the phase steps are first summed into 9 (11) bins by
+  sample index over runs of up to G groups (residual slip ≤ 30°), then each run
+  is combined with fixed Q10 bin weights and one rotation: ≈ 5 operations per
+  sample. Subtracting the bin mean removes the luma (DC) leakage exactly. The
+  lag-`step` boxcar loss at the subcarrier (sinc, 0.70 for PAL step 4) is
+  compensated.
+* Reference: the bursts of the colour line and of the line before it (only these
+  two are computed); their sum is the mean burst axis (PAL: the bisector of the
+  ±45° swing; NTSC: the burst), the PAL V switch of the line is the side of its
+  own burst. U/V are rotated to that axis and scaled to luma steps
+  (149 steps = 0.7 V, from the sync-tip/blanking levels of the line logic), so
+  the saturation does not depend on the burst amplitude, which is sent
+  separately (automatic colour control is a host decision).
+* Line selection: colour on every n-th line counted over all lines; n is never
+  a multiple of 3, 5 or 7, so it is coprime to 625/525 and the coloured lines
+  move by one line per frame — every line gets colour within n frames.
+  `every 0` = automatic: a governor keeps the CPU load per 8 KB block between
+  4.5 and 4.9 cycles/byte (overruns start at ≈5.3 including interrupts) and
+  backs off when the PARLIO ring backs up or colour records are dropped.
+* USB: colour gets its own 1/8 of the `kBps` budget, luma the rest.
+
+**Protocol.**
+
+```
+VFM <rate_idx> <D> <px> <std> <pol> <sel> <kBps> <cseg> [<every> [<step>]]
+  cseg 4..64 U/V pairs per line (0 = no colour = old behaviour), every 0 (auto) or 1..625, step 1 / 2 (default) / 4
+OK VFM <fin> <D> <px> <std> <pol_dev> <sel> <rate_Bps> <words> <cseg> <every> <step> <color_Bps>
+VFL ... (unchanged)
+VFC <seq> <t_us> <n> <2 + 2*cseg> <every> <crc32> <step>   + n x (10 + 2*cseg) bytes
+```
+
+`VFC` uses the `VFL` layout where a generic frame reader needs it: payload =
+`n × (8 + field 4)` bytes, CRC32 in field 6, and `seq` is one counter for both
+frame types. Colour record (little endian): `u16 line` (ITU, 0 = no vertical
+lock), `u8 flags` (1 PAL V switch −1 on this line (already applied), 2
+reference from two bursts, 4 weak burst < 4 steps (colour killer), 8 VLOCK,
+16 FIELD2, 32 NTSC), `u8 burst amplitude` (luma steps; nominal 0.15 V burst
+≈ 32), `u32 t16` (identical to the `t16` of the luma record of the same line),
+`u8 burst phase`, `u8 reference phase` (2π/256, against the run oscillator),
+then `cseg × (i8 U, i8 V)` in luma steps: U = 0.493·(B′−Y′)·149,
+V = 0.877·(R′−Y′)·149 of the white-normalised picture. Colour is only sent for
+the PARLIO source (`VFMSRC 1`; with `VFMSRC 0` the reply is
+`ERR vfm_color_needs_parlio`) and not for vertical-blanking lines.
+
+**Host side** (reference implementation `tools/vfm_color_view.py`): match a
+colour record to its line by `t16` (or line + field), keep the newest U/V per
+picture row, interpolate rows without colour yet vertically, average two rows of
+the same field (PAL delay-line effect), upsample the `cseg` values linearly to
+the luma pixels, Y′UV → R′G′B′ (B = Y + U/0.493, R = Y + V/0.877,
+G = (Y − 0.299 R − 0.114 B)/0.587 with Y = (px − 64)/149). Low-pass the colour
+vertically (≈6 rows). The phase bytes allow re-rotating each line with a
+reference tracked over many lines (PLL with drift rate on the reference phase,
+`--smooth`): +2…3 dB on clean simulated signals, but worse on the C5 PARLIO data
+(see the measurements), so the per-line reference is the default.
+
+`VCDATA [<VFM args after the rate index>]` (diagnostic) takes one 57 344-byte
+PARLIO snapshot and returns it with the luma and colour records the device
+computed from it (`PDATA …` + bytes, `VCX nl px crc nc nseg crc every step` +
+records); `tools/vfm_color_hw.py` recomputes them with the host build.
+
+### Colour measurements
+
+Board ESP32-C5 (4 MB, DevKitC-1 type), test picture: 75 % EBU colour bars, grey
+steps and a caption box (`gen_tv.mjs` of the ESPsoup app tools, PAL with V
+switch and ±135° burst / NTSC, ITU field structure, FM with ±3 MHz deviation;
+its pre-filter attenuates the subcarrier to 0.54, so the bars arrive with about
+half the nominal saturation), transmitted by a signal generator (Pluto SDR).
+
+**Offline first** (`tools/vfm_color_capture.py`, `vfm_color_analyse.py`,
+floating-point reference `vfm_color_ref.py`): chroma SNR = 75 % bar amplitude
+over the rms noise of one 1.6 µs segment (32 per line), averaged over the bars.
+
+| Data | PARLIO 4+4 bit, 40 MS/s | dump 10 bit, 20 MS/s |
+|---|---|---|
+| simulation, quantisation only | 33.5 dB (phase of every byte), 26.2 dB (every 4th) | 39.8 dB |
+| simulation, CNR 20 / 15 dB (40 MHz) | 28.8 / 16.6 dB (FM threshold) | 27.6 / 22.8 dB |
+| real, 5806 MHz, gain 66, PAL | 16.4 dB (step 2: 16.1, step 4: 15.5) | 18.7 dB |
+| real, 5806 MHz, NTSC | 18.8 dB | 18.2 dB |
+
+Hue error of the bars ≤ 2°. The 4-bit window costs ≈2 dB against the 10-bit
+dump; on real data the noise is not white, so using every 2nd byte's phase
+costs only 0.3 dB (simulation: 3 dB). At 2434 MHz a Wi-Fi access point 8 MHz
+away spoiled the 4-bit window; with the deviation of 4 MHz the luma
+discriminator (|f| < 5 MHz) wrapped — use ≤ 3 MHz or tune accordingly.
+
+**Live on the device** (2530 MHz, gain 64, 8 s per run; luma always all active
+lines; colour lines/s = records received; chroma SNR per segment from the
+records of the bar lines):
+
+| Run | luma lines/s | colour lines/s | every | kB/s | cycles/colour line | CPU cycles/byte | PARLIO duty | chroma SNR |
+|---|---|---|---|---|---|---|---|---|
+| luma only, px 40 | 14 396 (25 fps) | – | – | 761 | – | 5.09 | 100 % | – |
+| luma only, px 32 | 14 394 | – | – | 646 | – | 4.78 | 100 % | – |
+| auto, nseg 16, step 2, px 40 | 14 396 | 495 | ≈29 | 807 | 12 600 | 5.71 | 100 % | 14.7 dB |
+| auto, nseg 16, step 4, px 32 | 14 395 | 986 | 16 | 735 | 9 700 | 5.70 | 99.99 % | 11.3 dB |
+| every 16, nseg 32, step 2, px 32 | 13 572 | 851 | 16 | 715 | 17 100 | 5.97 | 94.9 % | 14.2 dB |
+| every 8, nseg 16, step 4, px 24 | 14 320 | 1 791 | 8 | 660 | 9 300 | 5.88 | 99.4 % | 11.1 dB |
+| auto, nseg 16, step 2, px 128 | 5 782 (USB) | 514 | ≈29 | 904 | 13 000 | 5.75 | 99.96 % | – |
+| NTSC auto, nseg 16, step 2, px 40 | 14 499 | 354 | ≈41 | 799 | 20 000 | 5.73 | 99.99 % | 20.0 dB |
+
+`VCDATA` (12 snapshots, 4 configurations): device and host records
+byte-identical. The luma stream is byte-identical with and without colour (host
+test). The luma path alone already takes 4.8–5.1 of the ≈5.7 cycles per byte
+that the C5 can spend without PARLIO overruns, so colour gets ≈0.3–0.6
+cycles/byte: ≈500–1000 colour lines/s, i.e. every 16th–29th line; with the
+rotation all 576 rows have colour after 16–29 frames (0.6–1.2 s), a coarse
+colour layer (every 16th–29th row, interpolated) is there after one frame.
+Step 4 is 25 % cheaper per line but measured 3 dB worse and 22 % less saturated
+on real data (the lag-4 differences of 4-bit samples), so step 2 is the
+default. The per-line reference phase (two bursts) jitters by ≈30° rms from
+line to line, but burst and chroma move together (smoothing the reference over
+many lines made the result worse: 14.2 → 12 dB) — probably the PARLIO sampling
+phase against the modem clock; the host therefore uses the per-line reference
+and low-passes the colour vertically (6 rows).
+
+### Colour limits
+
+* Coarse by design: 4–64 colour values per line (default 16 = 3.25 µs), colour
+  on every n-th line; cross-colour from fine luma detail near the subcarrier
+  frequency is not suppressed (no comb filter), the burst amplitude is reported
+  but not used (saturation follows the luma scale).
+* PARLIO source only (the dump engine is already at its CPU limit with luma at
+  20 MS/s); PAL and NTSC (NTSC-M subcarrier, 7.5 IRE setup is ignored); no
+  SECAM, no PAL-M/N, no colour on vertical-blanking lines.
+* A transmitter without burst (black-and-white camera) gives `weak` records;
+  FM pre-emphasis of a real transmitter would raise the chroma relative to luma
+  (the host can scale by the burst: nominal 0.15 V burst = 32 steps).
+* Alternative without firmware support: raw snapshots (`CAPT20`/`BIGCAP`,
+  1.6 ms ≈ 25 lines) between short `VFM` runs; the line numbers follow from the
+  snapshot time and the line clock of the `VFM` stream
+  (`tools/vfm_color_snapshots.py`: line predicted correctly over 6–8 s, 84 % of
+  the rows coloured after 60 snapshots ≈ 8 s; the snapshot times must be
+  jittered, a cadence locked to 40 ms hit the same lines). Better colour (whole
+  10-bit snapshot, any decoder) but the luma stream pauses for every snapshot
+  (≈70 ms per 64 KB over USB).
+
 ## Validation of version 0.7.0
 
 Re-measured after rebasing onto the current upstream (one ESP32-C5 DevKitC-1
@@ -541,6 +701,9 @@ type board, 4 MB flash, native USB):
   GNSS L1 and similar bands cannot be received.
 * **Hardware AGC** changes the gain inside packets: use `GAIN MANUAL` for
   GFSK/VFM and for the DC calibration.
+* Colour (VFMCOLOR) is coarse: 4–64 U/V values per line on every n-th line
+  (CPU), PAL/NTSC only (no SECAM), PARLIO source only, see
+  [limits](#colour-limits).
 * Not implemented: video sound sub-carrier, NBFM audio on the device (`STREAM`
   is sufficient), ELRS FLRC (fractional samples per bit), GFSK on the PARLIO
   path.
@@ -555,7 +718,10 @@ type board, 4 MB flash, native USB):
   FFT against a double-precision DFT, runs the VFM/GFSK demodulators on
   synthetic signals (`tests/espsoup/`, bit-exact with the device) and verifies
   the generated tables; the upstream command/tuning tests cover the C5 command
-  parser including `TUNEM` and BIGCAP limits.
+  parser including `TUNEM` and BIGCAP limits. `tests/espsoup/test_vfm_color.mjs`
+  checks the colour channel (PAL/NTSC bars: hue, saturation, SNR, V switch,
+  line rotation, steps 1/2/4, 18 dB, +40 ppm, luma byte-identical with and
+  without colour).
 * Device: `DMLOAD`/`DMVFM`/`DMGF` replay the host test vectors on the device;
   `VFMDATA`/`GFDATA`/`CSDATA` return a snapshot together with the device
   result for host comparison; `CSTAT?`, `DSTAT?`, `PSTAT?` report duty and
