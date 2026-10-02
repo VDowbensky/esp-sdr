@@ -579,28 +579,50 @@ static bool stream_run_p8(unsigned bits, unsigned R1, unsigned R2, int32_t offse
 #endif
 static unsigned vfm_src = ESPSOUP_VFM_PARLIO_DEFAULT;   /* VFMSRC: 1 = PARLIO, 0 = dump engine (c5_demod.h) */
 #define PFR 4u
+/* VFMCOLOR: automatic colour line rate.  Colour every n-th line, n not a multiple of 3, 5 or 7, so that n and the
+ * frame length (625 = 5^4, 525 = 3 * 5^2 * 7) are coprime and the coloured lines move by one line per frame (every
+ * line gets colour within n frames).  The governor (below) follows the PARLIO ring backlog (CPU) and the dropped colour
+ * records (USB budget). */
+static unsigned vc_next_every(unsigned n, int dir) {
+    do { n = dir > 0 ? n + 1 : n - 1; } while (n > 1 && (n % 3 == 0 || n % 5 == 0 || n % 7 == 0));
+    return n;
+}
+#define VC_EVERY_MIN 2u
+#define VC_EVERY_MAX 64u
 static bool vfm_run_p8(vf_t *s) {
     s->fin = 20000000; s->src = 1;
     if (!vf_init(s)) { reply("ERR vfm_args\n"); return false; }
     dm_release();
-    const unsigned rec = VF_REC + s->px, maxl = PFR * 6;
-    uint8_t *tab = dm_fast_alloc(256), *out = dm_fast_alloc(maxl * rec);
+    vc_t *vc = vc_cfg.nseg ? &vc_cfg : NULL; const bool cauto = vc && !vc->every;
+    if (vc) {
+        if (cauto) vc->every = 16;                      /* automatic: start moderate, the governor adapts within ~0.1 s */
+        if (!vc_init(vc)) { reply("ERR vfm_args\n"); return false; }
+    }
+    const unsigned rec = VF_REC + s->px, maxl = PFR * 6, crec = vc ? VC_REC + 2 * vc->nseg : 0;
+    uint8_t *tab = dm_fast_alloc(256), *out = dm_fast_alloc(maxl * rec), *cout = vc ? dm_fast_alloc(maxl * crec) : NULL;
     int16_t *bins = dm_fast_alloc((VFP_KEEP + PE_BLK / 8 + 4) * sizeof(int16_t));
     vf_run_t *runs = heap_caps_malloc(384 * sizeof(vf_run_t), MALLOC_CAP_8BIT);
-    bool ring = tab && out && bins && runs && ring_open_sz(16384);
+    bool ring = tab && out && bins && runs && (!vc || cout) && ring_open_sz(16384);
     if (!ring) {
-        free(tab); free(out); free(bins); free(runs);
+        free(tab); free(out); free(bins); free(runs); free(cout);
         char e[64]; snprintf(e, sizeof(e), "ERR vfm_memory %u\n", (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)); reply(e); return false;
     }
     memcpy(tab, vf_ptab, 256);
     s->tab = tab; s->bins = bins; s->runs = runs; s->maxruns = 384;
+    if (vc) { vc->out = cout; vc->max = maxl; vc->n = 0; s->vc = vc; }
+    uint32_t c_drop_seen = 0; unsigned quiet = 0; int32_t w_ema = 0;
     static pe_t e;
     char h[160];
     pc_level_robust = true;
     esp_err_t pe_err = pe_start(&e);
     pc_level_robust = false;
     if (pe_err) { ring_close(); free(tab); free(out); free(bins); free(runs); reply("ERR vfm_parlio\n"); return false; }
-    snprintf(h, sizeof(h), "OK VFM %u %u %u %u %u %u %u %u\n", s->fin, s->D, s->px, s->std_force, s->pol_force, s->sel, s->rate_Bps, PE_BLK);
+    if (vc) {   /* colour: 4 more fields in the OK line (nseg, every or 0 = automatic, step, colour budget); own 1/8 of the USB budget */
+        vc->rate = s->rate_Bps / 8;
+        snprintf(h, sizeof(h), "OK VFM %u %u %u %u %u %u %u %u %u %u %u %" PRIu32 "\n", s->fin, s->D, s->px, s->std_force, s->pol_force, s->sel, s->rate_Bps, PE_BLK,
+                 vc->nseg, cauto ? 0 : vc->every, vc->step, vc->rate);
+        s->rate_Bps -= vc->rate;
+    } else snprintf(h, sizeof(h), "OK VFM %u %u %u %u %u %u %u %u\n", s->fin, s->D, s->px, s->std_force, s->pol_force, s->sel, s->rate_Bps, PE_BLK);
     reply(h);
     uint32_t seq = 0, overruns = 0, pend_gap = 0, idle = 0; unsigned fnl = 0, fb = 0; int64_t ft_us = 0;
     const char *why = "stop";
@@ -623,9 +645,32 @@ static bool vfm_run_p8(vf_t *s) {
                 if (!ring_frame(h, hl, out, bytes)) overruns++;
                 seq++; pend_gap = 0; idle = 0;
             }
+            if (vc && vc->n) {                /* colour records of the same blocks (VFMCOLOR) */
+                unsigned cb = vc->n * crec;
+                uint32_t crc = esp_rom_crc32_le(0, cout, cb);
+                /* same layout as VFL where it matters: payload = n * (8 + f[4]) bytes, CRC in field 6, one seq for both */
+                int hl = snprintf(h, sizeof(h), "VFC %" PRIu32 " %" PRId64 " %u %u %u %08" PRIx32 " %u\n", seq, ft_us, vc->n, crec - 8, vc->every, crc, vc->step);
+                if (!ring_frame(h, hl, cout, cb)) overruns++;
+                seq++; vc->n = 0;
+            }
             fnl = 0; fb = 0;
         }
-        e.work_cyc += esp_cpu_get_cycle_count() - c1;
+        uint32_t wc = esp_cpu_get_cycle_count() - c1;
+        if (cauto) {   /* colour line governor on the ring backlog after this block (the CPU keeps up <=> backlog ~0-1 block;
+                        * interrupts add spikes; measured after the block, so ~1 block is normal): EMA (1/16) above 3 blocks, a backlog above 5 blocks or dropped colour records ->
+                        * fewer colour lines; EMA below 1.5 blocks over 16 blocks -> more */
+            uint32_t lag = pc_rx.prod - e.cons, dr = vc->drop_rate + vc->drop_full;
+            w_ema += ((int32_t)lag - w_ema) / 16;
+            if (lag > 5 * PE_BLK || dr != c_drop_seen || (++quiet >= 16 && w_ema > (int32_t)(PE_BLK * 3))) {
+                if (vc->every < VC_EVERY_MAX) vc->every = vc_next_every(vc->every, 1);
+                quiet = 0;
+            } else if (quiet >= 16) {
+                if (w_ema < (int32_t)(PE_BLK * 3 / 2) && vc->every > VC_EVERY_MIN) vc->every = vc_next_every(vc->every, -1);
+                quiet = 0;
+            }
+            c_drop_seen = dr;
+        }
+        e.work_cyc += wc;
         char l[48]; if (burst_serial_poll_run_line(l, sizeof(l))) break;
         if (st_tail != last_tail || !ring_used()) { last_tail = st_tail; last_progress = esp_timer_get_time(); }
         if (esp_timer_get_time() - last_progress > 2000000) { why = "stalled"; break; }
@@ -633,12 +678,47 @@ static bool vfm_run_p8(vf_t *s) {
     pe_stop(&e);
     ring_close();
     vf_last = *s; vf_have = true;
+    if (vc) { vc_last = *vc; vc_last.out = NULL; vc_have = true; vf_last.vc = &vc_last; s->vc = NULL; }
     snprintf(h, sizeof(h), "END VFM %" PRIu32 " %" PRIu32 " %" PRIu64 " %" PRIu32 " %" PRIu32 " %" PRIu32 " %" PRIu32 " %s\n", seq, e.blocks, e.lost, overruns,
              s->lines, s->l_out, s->l_drop_rate, why);
     burst_serial_drain_stop();
     reply(h);
-    free(tab); free(bins); free(runs); free(out);
+    free(tab); free(bins); free(runs); free(out); free(cout);
     return true;
+}
+
+/* VCDATA [<VFM args after the rate index>]: bit-exact check of VFM + colour on real data.  One PARLIO snapshot of
+ * 57344 bytes (current PLSB window, DC calibration as PDC), then vf_block_p8 with colour on it as one block (fresh
+ * state, no rate limit, colour on the lines the arguments select; host: demod_host vfmp with 57344-byte blocks).  Replies
+ *   PDATA n crc t0_us lsb nodes  + n bytes
+ *   VCX nl px crc_luma nc nseg crc_col every step  + nl x (VF_REC + px) + nc x (VC_REC + 2 nseg) bytes */
+static void vc_data(const char *args) {
+    static vf_t vs;
+    if (!vf_parse(args, &vs) || !vc_cfg.nseg || !vc_cfg.every) { reply("ERR vcdata_args\n"); return; }
+    vs.fin = 20000000; vs.src = 1; vs.rate_Bps = 0;
+    if (!vf_init(&vs) || !vc_init(&vc_cfg)) { reply("ERR vcdata_args\n"); return; }
+    const unsigned n = 7 * PE_BLK, maxl = 30, rec = VF_REC + vs.px, crec = VC_REC + 2 * vc_cfg.nseg;   /* one block of 57344 bytes (acquisition needs > 1 line) */
+    uint8_t *tab = dm_fast_alloc(256), *out = dm_fast_alloc(maxl * rec), *cout = dm_fast_alloc(maxl * crec);
+    int16_t *bins = dm_fast_alloc((VFP_KEEP + n / 8 + 4) * sizeof(int16_t));
+    vf_run_t *runs = heap_caps_malloc(384 * sizeof(vf_run_t), MALLOC_CAP_8BIT);
+    uint8_t *buf = pc_use_bank1() ? PC_BANK1 : NULL;
+    if (!tab || !out || !cout || !bins || !runs || !buf) { free(tab); free(out); free(cout); free(bins); free(runs); reply("ERR vcdata_memory\n"); return; }
+    memcpy(tab, vf_ptab, 256);
+    vs.tab = tab; vs.bins = bins; vs.runs = runs; vs.maxruns = 384;
+    vc_cfg.out = cout; vc_cfg.max = maxl; vc_cfg.n = 0; vc_cfg.rate = 0; vs.vc = &vc_cfg;
+    if (pc_dccal) dc_calibrate();
+    int64_t t0 = 0;
+    esp_err_t err = pc_snap(buf, n, pc_map, 0, &t0);
+    if (err) { char m[48]; snprintf(m, sizeof(m), "ERR vcdata %d\n", (int)err); reply(m); free(tab); free(out); free(cout); free(bins); free(runs); return; }
+    unsigned nl = vf_block_p8(&vs, buf, n, 0, t0 * 16, out, maxl);
+    char h[160];
+    snprintf(h, sizeof(h), "PDATA %u %08" PRIx32 " %" PRId64 " %d %" PRIu32 "\n", n, esp_rom_crc32_le(0, buf, n), t0, pc_lsb, pc_rx.nodes);
+    bool ok = send_bytes(h, strlen(h)) && send_bytes(buf, n);
+    snprintf(h, sizeof(h), "VCX %u %u %08" PRIx32 " %u %u %08" PRIx32 " %u %u\n", nl, vs.px, esp_rom_crc32_le(0, out, nl * rec), vc_cfg.n, vc_cfg.nseg,
+             esp_rom_crc32_le(0, cout, vc_cfg.n * crec), vc_cfg.every, vc_cfg.step);
+    if (ok) (void)(send_bytes(h, strlen(h)) && send_bytes(out, nl * rec) && send_bytes(cout, vc_cfg.n * crec));
+    vf_last = vs; vf_have = true; vc_last = vc_cfg; vc_last.out = NULL; vc_have = true; vf_last.vc = &vc_last;
+    free(tab); free(out); free(cout); free(bins); free(runs);
 }
 
 /* STRSRC 1: R1 * R2 = 2.5e6 / out (R2 2, 4, 8 or 5; R1 2..128: the CIC sees 2.5 MS/s) -> e.g. 250k, 125k, 100k, 50k,
@@ -663,6 +743,7 @@ static bool parlio_command(char *line) {
     if (sscanf(line, "STRSRC %u %c", &n, &extra) == 1 && n <= 1) { st_src = n; reply("OK\n"); return true; }
     if (!strcmp(line, "STRSRC?")) { reply(st_src ? "STRSRC 1 PARLIO\n" : "STRSRC 0 DUMP\n"); return true; }
     if (!strcmp(line, "VFMSRC?")) { reply(vfm_src ? "VFMSRC 1 PARLIO\n" : "VFMSRC 0 DUMP\n"); return true; }
+    if (!strncmp(line, "VCDATA", 6) && (line[6] == ' ' || !line[6])) { vc_data(line + 6); return true; }
     if (vfm_src && !strncmp(line, "VFM ", 4)) {
         unsigned div; int nn = 0; static vf_t vs;
         if (sscanf(line + 4, "%u%n", &div, &nn) != 1 || (div != 2 && div != 3) || !vf_parse(line + 4 + nn, &vs)) { reply("ERR vfm_args\n"); return true; }

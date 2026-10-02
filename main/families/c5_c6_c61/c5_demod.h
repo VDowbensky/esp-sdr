@@ -12,6 +12,8 @@
 #define VFP_ATTR IRAM_ATTR
 #include "demod_dsp.h"
 static vf_t vf_last; static gf_t gf_last;            /* DSTAT? */
+/* VFM colour (VFMCOLOR): the request of the last VFM line (nseg 0 = off) and the statistics of the last run */
+static vc_t vc_cfg; static vc_t vc_last; static bool vc_have;
 /* test-vector buffers (DMLOAD/DMVFM/DMGF); released before any engine run needs the heap */
 static uint32_t *dm_up; static vf_t dm_vs; static gf_t dm_gs; static int16_t *dm_bins; static vf_run_t *dm_runs;
 /* hot DSP buffers: main SRAM first (MALLOC_CAP_DMA excludes the slow LP SRAM heap), else anywhere */
@@ -38,6 +40,7 @@ static unsigned vf_state(const vf_t *s) { return (s->locked ? 1u : 0) | (s->vloc
 static bool vfm_run(unsigned div, vf_t *s) {
     s->fin = hw_rates[div];
     if (!vf_init(s)) { reply("ERR vfm_args\n"); return false; }
+    if (vc_cfg.nseg) { reply("ERR vfm_color_needs_parlio\n"); return false; }   /* colour only on the PARLIO source (VFMSRC 1) */
     unsigned words = CONT_WORDS; bool ring = false; uint32_t *cbuf = NULL; uint8_t *tab = NULL, *out = NULL; int16_t *bins = NULL; vf_run_t *runs = NULL;
     unsigned maxl = 0;
     dm_release();
@@ -194,17 +197,21 @@ static bool gf_parse(const char *args, unsigned div, gf_t *g) {
     if (div == 2) return R >= 4;                   /* 20 MS/s: CPU only with R >= 4 */
     return div >= 3 && div <= 5;
 }
-/* VFM argument parser: <D> <px> <std> <pol(host: 1 tip lowest, 2 tip highest)> <sel> <kBps> */
+/* VFM argument parser: <D> <px> <std> <pol(host: 1 tip lowest, 2 tip highest)> <sel> <kBps> [<cseg> [<every> [<step>]]]
+ * cseg > 0 requests colour (VFMCOLOR, vc_cfg): cseg U/V pairs per line, every n-th line (0 = automatic), phase of
+ * every step-th byte (1, 2, 4; default 2).  Without cseg the run is exactly the old one. */
 static bool vf_parse(const char *args, vf_t *s) {
-    unsigned D = 0, px = 128, st = 0, pol = 0, sel = 1, kb = 850; char x;
-    int m = sscanf(args, "%u %u %u %u %u %u %c", &D, &px, &st, &pol, &sel, &kb, &x);
-    if (m > 6 || st > 2 || pol > 2 || sel > 3) return false;
+    unsigned D = 0, px = 128, st = 0, pol = 0, sel = 1, kb = 850, cs = 0, ce = 0, cst = 2; char x;
+    int m = sscanf(args, "%u %u %u %u %u %u %u %u %u %c", &D, &px, &st, &pol, &sel, &kb, &cs, &ce, &cst, &x);
+    if (m > 9 || st > 2 || pol > 2 || sel > 3) return false;
+    if (cs && (cs < 4 || cs > 64 || ce > 625 || (cst != 1 && cst != 2 && cst != 4))) return false;
     memset(s, 0, sizeof(*s));
     s->D = D; s->px = px; s->std_force = st; s->pol_force = pol == 1 ? 2 : pol == 2 ? 1 : 0; s->sel = sel; s->rate_Bps = kb * 1000;
+    memset(&vc_cfg, 0, sizeof(vc_cfg)); vc_cfg.nseg = cs; vc_cfg.every = ce; vc_cfg.step = cst;
     return true;
 }
 static void dm_stat(void) {
-    char h[400]; int o = snprintf(h, sizeof(h), "DSTAT");
+    char h[600]; int o = snprintf(h, sizeof(h), "DSTAT");
     if (vf_have) {
         const vf_t *s = &vf_last; double ns = s->samples ? (double)s->samples : 1;
         o += snprintf(h + o, sizeof(h) - o, " vfm blocks %" PRIu32 " lines %" PRIu32 " sync %" PRIu32 " fly %" PRIu32 " out %" PRIu32 " drop_rate %" PRIu32 " drop_cut %" PRIu32
@@ -212,6 +219,13 @@ static void dm_stat(void) {
                       " cps_disc %.2f cps_sync %.2f cps_slice %.2f",
                       s->blocks, s->lines, s->l_sync, s->l_fly, s->l_out, s->l_drop_rate, s->l_drop_cut, s->l_vbi, s->vsyncs, s->relocks, s->acq, -s->pol, s->std, s->qs,
                       vf_khz(s, s->tip16), vf_khz(s, s->blank16), (int32_t)((int64_t)s->T16 * 200 / 65536), (int)vf_bins_lp, s->cyc_disc / ns, s->cyc_sync / ns, s->cyc_slice / ns);
+        if (vc_have && s->vc) {
+            const vc_t *c = &vc_last;
+            o += snprintf(h + o, sizeof(h) - o, " color lines %" PRIu32 " ref2 %" PRIu32 " weak %" PRIu32 " drop_rate %" PRIu32 " drop_full %" PRIu32 " drop_cut %" PRIu32
+                          " pre %" PRIu32 " nseg %u every %u step %u cps_color %.2f cyc_line %.0f",
+                          c->lines, c->ref2, c->weak, c->drop_rate, c->drop_full, c->drop_cut, c->pre, c->nseg, c->every, c->step, s->cyc_color / ns,
+                          (c->lines + c->pre) ? (double)s->cyc_color / (c->lines + c->pre) : 0.0);
+        }
     }
     if (gf_have) {
         const gf_t *g = &gf_last; double ns = g->samples ? (double)g->samples : 1;
