@@ -17,3 +17,17 @@ bool burst_serial_send(const void *data, size_t size);
 
 /* Consume a stream stop request on the owning port only. */
 bool burst_serial_stop_requested(void);
+
+/* Helpers for long-running commands (active port only):
+ * try_send: non-blocking, returns the bytes accepted by the hardware FIFO.
+ * poll_run_line: non-blocking line reader, true once a complete line is in buf.
+ * drain_stop: discard the rest of a stop request and any partial line.
+ * ring_*: native USB only, an ISR drains a caller-owned byte ring (head/tail
+ * are free-running byte counters); start returns false on other ports. */
+#include <stdint.h>
+int burst_serial_try_send(const void *data, size_t size);
+bool burst_serial_poll_run_line(char *buf, size_t capacity);
+void burst_serial_drain_stop(void);
+bool burst_serial_ring_start(const uint8_t *buf, unsigned size, volatile unsigned *head, volatile unsigned *tail);
+void burst_serial_ring_kick(void);
+void burst_serial_ring_stop(void);

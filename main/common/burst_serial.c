@@ -127,6 +127,129 @@ bool burst_serial_stop_requested(void) {
     return stopped;
 }
 
+/* Helpers for long-running commands that must keep receiving while they
+ * send (continuous capture, streaming). Active port only. */
+
+/* Non-blocking: returns the number of bytes the hardware FIFO accepted. */
+int IRAM_ATTR burst_serial_try_send(const void *data, size_t size) {
+    const uint8_t *p = data;
+    size_t done = 0;
+    if (active_port == BURST_SERIAL_UART) {
+#if CONFIG_ESP_SDR_UART_ENABLED
+        int sent = uart_tx_chars(UART_NUM_0, (const char *)p, size > 128 ? 128 : size);
+        return sent < 0 ? 0 : sent;
+#else
+        return 0;
+#endif
+    }
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+    while (done < size && usb_serial_jtag_ll_txfifo_writable()) {
+        size_t chunk = size - done > 64 ? 64 : size - done;
+        int sent = usb_serial_jtag_ll_write_txfifo(p + done, chunk);
+        usb_serial_jtag_ll_txfifo_flush();
+        if (sent <= 0) break;
+        done += sent;
+    }
+#endif
+    return (int)done;
+}
+
+/* Interrupt-driven native-USB transmit from a caller-owned byte ring (single
+ * producer = main loop, single consumer = ISR). Keeps the 64-byte USB FIFO
+ * refilled while the CPU runs DSP code. UART callers poll try_send instead. */
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+#include "esp_intr_alloc.h"
+#include "soc/interrupts.h"
+static intr_handle_t ring_isr;
+static const uint8_t *ring_buf;
+static unsigned ring_size;
+static volatile unsigned *ring_head, *ring_tail;
+static void IRAM_ATTR ring_fill(void) {
+    unsigned head = *ring_head, tail = *ring_tail;
+    if (head == tail || !usb_serial_jtag_ll_txfifo_writable()) return;
+    unsigned count = head - tail, offset = tail % ring_size;
+    if (count > 64) count = 64;
+    if (count > ring_size - offset) count = ring_size - offset;
+    int sent = usb_serial_jtag_ll_write_txfifo(ring_buf + offset, count);
+    usb_serial_jtag_ll_txfifo_flush();
+    *ring_tail = tail + (unsigned)sent;
+}
+static void IRAM_ATTR ring_tx_isr(void *arg) {
+    (void)arg;
+    uint32_t status = usb_serial_jtag_ll_get_intsts_mask();
+    if (!(status & USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY)) return;
+    usb_serial_jtag_ll_clr_intsts_mask(USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY);
+    ring_fill();
+    if (*ring_head == *ring_tail) usb_serial_jtag_ll_disable_intr_mask(USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY);
+}
+#endif
+bool burst_serial_ring_start(const uint8_t *buf, unsigned size, volatile unsigned *head, volatile unsigned *tail) {
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+    if (active_port != BURST_SERIAL_USB) return false;
+    ring_buf = buf; ring_size = size; ring_head = head; ring_tail = tail;
+    usb_serial_jtag_ll_disable_intr_mask(USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY);
+    usb_serial_jtag_ll_clr_intsts_mask(USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY);
+    if (esp_intr_alloc(ETS_USB_SERIAL_JTAG_INTR_SOURCE, ESP_INTR_FLAG_IRAM, ring_tx_isr, NULL, &ring_isr) != ESP_OK) {
+        ring_isr = NULL;
+        return false;
+    }
+    return true;
+#else
+    (void)buf; (void)size; (void)head; (void)tail;
+    return false;
+#endif
+}
+void IRAM_ATTR burst_serial_ring_kick(void) {
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+    if (!ring_isr) return;
+    /* The IN-empty status is an event: prime the FIFO here, then let the ISR
+     * continue once the host has taken the packet. */
+    unsigned irq = portSET_INTERRUPT_MASK_FROM_ISR();
+    ring_fill();
+    if (*ring_head != *ring_tail) usb_serial_jtag_ll_ena_intr_mask(USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY);
+    portCLEAR_INTERRUPT_MASK_FROM_ISR(irq);
+#endif
+}
+void burst_serial_ring_stop(void) {
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+    if (!ring_isr) return;
+    usb_serial_jtag_ll_disable_intr_mask(USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY);
+    esp_intr_free(ring_isr);
+    ring_isr = NULL;
+    usb_serial_jtag_ll_clr_intsts_mask(USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY);
+#endif
+}
+
+/* Non-blocking line reader for long-running commands: true once a complete
+ * line is in buf (NUL-terminated, carriage returns dropped). */
+bool burst_serial_poll_run_line(char *buf, size_t capacity) {
+    static char acc[COMMAND_SIZE];
+    static size_t used;
+    char ch;
+    for (unsigned k = 0; k < 64; ++k) {
+        if (read_port(active_port, &ch, 1) != 1) return false;
+        if (ch == '\r') continue;
+        if (ch != '\n') { if (used < sizeof(acc) - 1) acc[used++] = ch; continue; }
+        size_t n = used < capacity - 1 ? used : capacity - 1;
+        memcpy(buf, acc, n);
+        buf[n] = '\0';
+        used = 0;
+        return true;
+    }
+    return false;
+}
+
+/* Discard the rest of a stop request and any partial command line. */
+void burst_serial_drain_stop(void) {
+    char ch;
+    int64_t end = esp_timer_get_time() + 20000;
+    while (esp_timer_get_time() < end) {
+        if (read_port(active_port, &ch, 1) == 1) end = esp_timer_get_time() + 20000;
+        else break;
+    }
+    memset(&input[active_port], 0, sizeof(input[active_port]));
+}
+
 int burst_serial_poll_line(char *line, size_t capacity) {
     for (unsigned j = 0; j < BURST_SERIAL_COUNT; ++j) {
         unsigned port = (next_port + j) % BURST_SERIAL_COUNT;
