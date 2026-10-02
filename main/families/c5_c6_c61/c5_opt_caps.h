@@ -8,8 +8,9 @@
 #pragma once
 #define FWOPT_VERSION "0.7.0"
 #define CAP_MAX_WORDS 32704u   /* BIGCAP: two-half dump, see c5_engine.h */
-#define C5_OPT_CAPS " BIGCAP CAPT TEMP FREQK FWOPT DDC SPECDB SWEEP STREAM CONT CSPEC CGRID CPKT"
+#define C5_OPT_CAPS " BIGCAP CAPT TEMP FREQK FWOPT DDC SPECDB SWEEP STREAM CONT CSPEC CGRID CPKT TUNEM"
 #define LIMITS_EXTRA ",\"maxSamples\":32704" \
     ",\"stream\":{\"hw\":[8000000,10000000,20000000,4000000],\"maxRate\":500000,\"bits\":[8,16],\"block\":8192,\"gapped\":true,\"cont\":true}" \
     ",\"cspec\":{\"nfft\":[16,256],\"modes\":[\"mean\",\"max\",\"both\"]}" \
-    ",\"ddc\":{\"src\":[80000000,40000000,20000000],\"bits\":[8,16]},\"spec\":{\"nfft\":[64,1024]},\"freqStepHz\":1000"
+    ",\"ddc\":{\"src\":[80000000,40000000,20000000],\"bits\":[8,16]},\"spec\":{\"nfft\":[64,1024]},\"freqStepHz\":1000" \
+    ",\"lockMHz\":[[2130,2730],[4790,5990]]"

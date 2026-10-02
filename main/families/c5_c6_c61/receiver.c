@@ -396,6 +396,14 @@ static void handle_command(char *line) {
         else if(!strcmp(line,"INFO")) {
             char h[64];snprintf(h,sizeof(h),BURST_ID " 6 burst %u\n",IQ_WORDS);reply(h);
         }
+#if CONFIG_IDF_TARGET_ESP32C5
+        else if(sscanf(line,"TUNEM %u %c",&n,&extra)==1 && c5_tune_method_valid(n)) {
+            c5_tune_method=n;rx_ready=false;prepare_rx();reply("OK\n");
+        }
+        else if(!strcmp(line,"TUNEM?")) {
+            char answer[24];snprintf(answer,sizeof(answer),"TUNEM %u\n",c5_tune_method);reply(answer);
+        }
+#endif
         else if(sscanf(line,"FREQ %u %c",&n,&extra)==1 && frequency_valid(n)) {
 #if CONFIG_IDF_TARGET_ESP32C5
             c5_khz_offset=0;

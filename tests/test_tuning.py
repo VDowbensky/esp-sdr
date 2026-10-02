@@ -7,6 +7,15 @@ import unittest
 
 MAIN = Path(__file__).resolve().parents[1] / 'main'
 
+# Host stand-ins for the Wi-Fi driver / libphy calls of the ESPsoup C5 TUNEM paths.
+C5_WIFI_STUB = r'''
+enum { WIFI_SECOND_CHAN_NONE };
+static unsigned wifi_channel, wifi_calls, changes, mode11p;
+int esp_wifi_set_channel(unsigned char ch, int second){assert(second==WIFI_SECOND_CHAN_NONE);wifi_channel=ch;wifi_calls++;return 0;}
+void phy_change_channel(int f,int a,int b,int c){assert(a==1 && !b && !c);pll=f;changes++;}
+void phy_11p_set(int on,int b){assert(!b);mode11p=on;}
+'''
+
 @unittest.skipUnless(shutil.which('cc'), 'Host C compiler unavailable')
 class Tuning(unittest.TestCase):
     def compile_run(self, source):
@@ -50,6 +59,8 @@ unsigned rtc_clk_xtal_freq_get(void){return 40;}
         helpers['esp32c6'] = (source[source.index('static void c6_set_chan('):source.index('#define phy_chip_set_chan')], 'c6_set_chan(f,0)')
         for target, call in [('esp32c5','c5_set_chan(f,0)'), ('esp32c61','c61_set_chan(f,0)'), ('esp32s31','s31_tune(f)')]:
             helpers[target] = (f'#include "targets/{target}/tuning.h"\n', call)
+        # ESPsoup C5: the esp-sdr channel path is TUNEM 0; the TUNEM paths are checked in test_c5_tune_methods.
+        helpers['esp32c5'] = (C5_WIFI_STUB + helpers['esp32c5'][0], 'c5_tune_method=0,c5_set_chan(f,0)')
         for target, (helper, call) in helpers.items():
             with self.subTest(target=target):
                 self.compile_run(stub+helper+r'''
@@ -88,9 +99,12 @@ void phy_pbus_xpd_rx_on(unsigned x){assert(x==1);}
 void phy_set_rxclk_en(unsigned x){assert(x==1);}
 void phy_rx_filter_mode(unsigned x){assert(x==12);}
 void gain_apply(void){}
+void phy_set_freq(unsigned f,int o){assert(0);}
+''' + C5_WIFI_STUB + r'''
 #include "targets/esp32c5/tuning.h"
 ''' + prepare + r'''
 int main(void){
+ c5_tune_method=0; /* ESPsoup TUNEM 0 = this esp-sdr channel path; the PHY mode applies there */
  for(unsigned mode=0;mode<=1;mode++)for(unsigned f=2300;f<=5500;f+=3200){
   frequency_mhz=f;rx_channel_mode=mode;rx_ready=false;
   unsigned before=calls;prepare_rx();
@@ -99,6 +113,37 @@ int main(void){
   prepare_rx();assert(calls==before+1);
  }
  rx_filter=12;rx_ready=false;prepare_rx();assert(last_mode==1);
+}
+''')
+
+    def test_c5_tune_methods(self):
+        """ESPsoup TUNEM: auto picks the Wi-Fi driver path above 3 GHz unless a kHz offset is set."""
+        self.compile_run(r'''
+#include <assert.h>
+#include <stdbool.h>
+static unsigned calibrated,pll,stock,setfreq;
+static int offset_khz;
+unsigned char phy_param[50]={[49]=2};
+void phy_set_chanfreq(unsigned f,unsigned m){calibrated=f;stock++;}
+void phy_set_rf_freq_offset(unsigned c,unsigned f,int o){assert(c==2);pll=f;offset_khz=o;}
+void phy_set_freq(unsigned f,int o){assert(o==0);pll=f;setfreq++;}
+''' + C5_WIFI_STUB + r'''
+#include "targets/esp32c5/tuning.h"
+static void reset(void){calibrated=pll=stock=wifi_calls=changes=setfreq=0;wifi_channel=0;}
+int main(void){
+ assert(c5_tune_method==4 && !c5_tune_method_valid(1) && !c5_tune_method_valid(6) && c5_tune_method_valid(5));
+ for(unsigned f=100;f<=6000;f++){
+  reset();c5_set_chan(f,1);assert(pll==f);
+  if(f>3000) assert(changes==1 && !stock && wifi_channel==140);
+  else assert(!changes && stock==1 && calibrated==2412);
+ }
+ reset();c5_khz_offset=250;c5_set_chan(5800,1);assert(stock==1 && !changes && offset_khz==250 && calibrated==5180);
+ c5_khz_offset=0;
+ c5_tune_method=2;reset();c5_set_chan(2437,0);assert(changes==1 && wifi_channel==6 && pll==2437);
+ c5_tune_method=3;reset();c5_set_chan(5900,0);assert(mode11p==1 && changes==1);
+ c5_tune_method=0;reset();c5_set_chan(5900,0);assert(mode11p==0 && stock==1 && pll==5900);
+ c5_tune_method=5;reset();c5_set_chan(5800,0);assert(setfreq==1 && wifi_channel==161 && pll==5800 && !changes);
+ reset();c5_set_chan(2300,0);assert(setfreq==1 && wifi_channel==1);
 }
 ''')
 

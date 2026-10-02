@@ -48,9 +48,10 @@ static unsigned phy_chip_i2c_readReg(unsigned a,unsigned b,unsigned c) { return 
 #if CONFIG_IDF_TARGET_ESP32C5
 /* ESPsoup extensions (c5_opt.h) are host-tested separately; stand-ins here. */
 #define CAP_MAX_WORDS 32704u
-#define C5_OPT_CAPS " BIGCAP"
-static unsigned opt_calls;
+#define C5_OPT_CAPS " BIGCAP TUNEM"
+static unsigned c5_tune_method=4,opt_calls;
 static int c5_khz_offset;
+static bool c5_tune_method_valid(unsigned m){return m<=5 && m!=1;}
 static bool opt_command(char *s){opt_calls++;if(strcmp(s,"FWOPT?"))return false;reply("FWOPT test\n");return true;}
 #else
 #define CAP_MAX_WORDS IQ_WORDS
@@ -91,7 +92,10 @@ int main(void) {
  command("CAP16 32704 1");assert(captures==5 && last_samples==32704 && last_format==16);
  captures=4;
  command("FWOPT?");assert(!strcmp(response,"FWOPT test\n") && opt_calls);
- command("CAPS");assert(strstr(response,"BIGCAP"));
+ command("CAPS");assert(strstr(response,"BIGCAP") && strstr(response,"TUNEM"));
+ command("TUNEM 2");assert(!strcmp(response,"OK\n") && c5_tune_method==2);
+ command("TUNEM?");assert(!strcmp(response,"TUNEM 2\n"));
+ command("TUNEM 1");assert(!strcmp(response,"ERR command\n") && c5_tune_method==2);
  c5_khz_offset=300;command("FREQ 2437");assert(!c5_khz_offset);
  const char *bad[]={"CAP16 32705 0","CAP20 255 0",
 #else
