@@ -1,0 +1,1 @@
+build_firmware.py --profile esp32s3 --version 1.00 
