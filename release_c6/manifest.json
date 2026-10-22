@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "name": "ESPsoup firmware 0.7.0 (receive-only ESP-SDR for ESP32-C5, GPL-3.0)",
+  "variants": {
+    "esp32c5": {
+      "label": "ESP32-C5 ESPsoup 0.7.0",
+      "chip": "ESP32-C5",
+      "target": "esp32c5",
+      "version": "0.7.0",
+      "build_date": "2026-10-20",
+      "flash_size": "2MB",
+      "flash_size_policy": "minimum",
+      "flash_settings": {
+        "flash_mode": "dio",
+        "flash_size": "2MB",
+        "flash_freq": "80m"
+      },
+      "source": {
+        "commit": "0a7a405b370b349c056184950aa54db4e6e92c04 (with uncommitted changes)",
+        "idf": ""
+      },
+      "parts": [
+        {
+          "name": "bootloader.bin",
+          "offset": 0,
+          "size": 22128,
+          "sha256": "e555635f9f1a23563085fc55b1754529f2f17123fc0c875cacd96f4bc469c084",
+          "md5": "f38f9a3cddcc75d3542d4c8808ac7d14"
+        },
+        {
+          "name": "partition-table.bin",
+          "offset": 32768,
+          "size": 3072,
+          "sha256": "7f00b6c042a89b15b0cac534f82ed988caf29278ff5700b0c511eb1b5bb7c820",
+          "md5": "5d61d196adc3dba01928f264eb169be7"
+        },
+        {
+          "name": "espsoup-firmware-0.7.0-esp32c5.bin",
+          "offset": 65536,
+          "size": 798848,
+          "sha256": "1dd7bade4670f9c1b8d7bea1d491f0c2d714261acec5a6dd35e6555bd5f3fc82",
+          "md5": "b12c94ddcf9ca5b4cbcf2cf95fc834bd"
+        }
+      ]
+    }
+  }
+}

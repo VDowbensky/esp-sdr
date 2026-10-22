@@ -1,0 +1,2 @@
+idf.py -B build-c6 "-DIDF_TARGET=esp32c6" "-DSDKCONFIG=sdkconfig.c6" "-DSDKCONFIG_DEFAULTS=sdkconfig.defaults.esp32c6" build
+python tools/espsoup_release.py --build-dir build-c6 --version 0.7.0 --output release_c6

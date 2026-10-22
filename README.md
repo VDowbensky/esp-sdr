@@ -38,8 +38,7 @@ then build like any other profile:
 
 ```sh
 git submodule update --init
-idf.py -B build-c5 -DIDF_TARGET=esp32c5 -DSDKCONFIG=sdkconfig.c5 \
-  -DSDKCONFIG_DEFAULTS=sdkconfig.defaults.esp32c5 build
+idf.py -B build-c5 "-DIDF_TARGET=esp32c5" "-DSDKCONFIG=sdkconfig.c5" "-DSDKCONFIG_DEFAULTS=sdkconfig.defaults.esp32c5" build
 idf.py -B build-c5 -p /dev/ttyACM0 flash
 ```
 

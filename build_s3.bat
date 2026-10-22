@@ -1,0 +1,2 @@
+idf.py -B build-s3 "-DIDF_TARGET=esp32s3" "-DSDKCONFIG=sdkconfig.s3" "-DSDKCONFIG_DEFAULTS=sdkconfig.defaults.esp32s3" build
+python tools/espsoup_release.py --build-dir build-s3 --version 0.7.0 --output release_s3
