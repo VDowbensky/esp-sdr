@@ -46,7 +46,7 @@ On Windows PowerShell quote the `-D` arguments (`"-DIDF_TARGET=esp32c5"`).
 `python tools/espsoup_release.py --build-dir build-c5 --version 0.7.0 --output release`
 packages a build (bootloader, partition table, application, `manifest.json`,
 `flash_args`, `SHA256SUMS`). A release can be flashed with
-`python -m esptool --chip esp32c5 -p PORT -b 921600 write-flash @flash_args`;
+`d`;
 back up the old flash first (`read-flash 0 ALL backup.bin`). Distribute
 binaries only together with the corresponding source (GPL).
 

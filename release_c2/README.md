@@ -33,6 +33,6 @@ Verify the files first: `sha256sum -c SHA256SUMS`.
 GPL-3.0 (ESP-SDR by ESPARGOS is GPL-3.0-or-later; see NOTICE in the source
 for the ESPsoup additions and the C5VRX note). These binaries may only be
 redistributed together with the corresponding source code: the source
-commit is `0a7a405b370b349c056184950aa54db4e6e92c04`, built with ESP-IDF `see firmware-targets.json`.
+commit is `1fcabafa27a0064dfe9cd929fc9a6923d3ac9f58 (with uncommitted changes)`, built with ESP-IDF `see firmware-targets.json`.
 
-Build date 2026-10-20.
+Build date 2026-10-22.

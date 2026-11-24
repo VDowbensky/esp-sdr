@@ -7,7 +7,7 @@
       "chip": "ESP32-C5",
       "target": "esp32c5",
       "version": "0.7.0",
-      "build_date": "2026-10-20",
+      "build_date": "2026-10-22",
       "flash_size": "2MB",
       "flash_size_policy": "minimum",
       "flash_settings": {
@@ -16,7 +16,7 @@
         "flash_freq": "60m"
       },
       "source": {
-        "commit": "0a7a405b370b349c056184950aa54db4e6e92c04",
+        "commit": "1fcabafa27a0064dfe9cd929fc9a6923d3ac9f58 (with uncommitted changes)",
         "idf": ""
       },
       "parts": [
@@ -38,8 +38,8 @@
           "name": "espsoup-firmware-0.7.0-esp32c5.bin",
           "offset": 65536,
           "size": 607808,
-          "sha256": "e199f8c5b2b5ed8902bdab1aca2f64d675be41618198a14566ab6f331cb582bc",
-          "md5": "e6a36d1c3023dcb0aaf4349cbc5d36ad"
+          "sha256": "8cb760dc1d6b57942d383490c8d4ee07c2b578d1e25c207a367635023954527d",
+          "md5": "70e032a3a1be641e61558afdc074ce07"
         }
       ]
     }
